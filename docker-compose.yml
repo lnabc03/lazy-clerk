@@ -1,0 +1,9 @@
+services:
+  lazy-clerk:
+    build: .
+    ports:
+      - "127.0.0.1:8787:8000"   # 仅监听本机，前置反代任选
+    volumes:
+      - ./data:/app/data
+    env_file: .env
+    restart: unless-stopped

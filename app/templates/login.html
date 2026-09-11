@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}登录 · lazy-clerk{% endblock %}
+{% block content %}
+<div class="card card-narrow shadow-sm">
+    <div class="card-body p-4">
+        <h4 class="text-center mb-1">lazy-clerk</h4>
+        <p class="text-center text-muted small mb-4">实习考勤自动签到</p>
+        <form method="post" action="/login">
+            <div class="mb-3">
+                <label class="form-label">工号</label>
+                <input name="account" class="form-control" required autofocus>
+            </div>
+            <div class="mb-3">
+                <label class="form-label">密码</label>
+                <input name="password" type="password" class="form-control" required>
+            </div>
+            <button class="btn btn-primary w-100">登录</button>
+        </form>
+        <p class="text-center small mt-3 mb-2">
+            有邀请码？<a href="/register">去注册</a>
+            <span class="text-muted mx-1">·</span>
+            <a href="/admin/login" class="text-muted">管理员入口</a>
+        </p>
+        <hr>
+        <p class="small text-muted text-center mb-2">
+            <a data-bs-toggle="collapse" href="#changePwd" role="button">更改密码</a>
+        </p>
+        <div class="collapse" id="changePwd">
+            <form method="post" action="/change-password">
+                <div class="mb-2">
+                    <input name="account" class="form-control form-control-sm" placeholder="工号" required>
+                </div>
+                <div class="mb-2">
+                    <input name="password" type="password" class="form-control form-control-sm"
+                           placeholder="新密码" required>
+                </div>
+                <div class="mb-2">
+                    <input name="password2" type="password" class="form-control form-control-sm"
+                           placeholder="再输一次" required>
+                </div>
+                <button class="btn btn-outline-primary btn-sm w-100">确认更改</button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

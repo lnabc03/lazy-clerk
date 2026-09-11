@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}我的签到 · lazy-clerk{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h4 class="mb-0">你好，{{ user.nickname }}</h4>
+    <form method="post" action="/logout">
+        <button class="btn btn-outline-secondary btn-sm">退出登录</button>
+    </form>
+</div>
+
+<div class="card shadow-sm mb-3">
+    <div class="card-body d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div>
+            <span class="badge bg-{{ 'success' if user.enabled else 'secondary' }}">
+                {{ '启用中' if user.enabled else '已停用' }}
+            </span>
+            <span class="ms-2">下次自动执行：<strong>{{ next_run }}</strong></span>
+        </div>
+        <form method="post" action="/me/sign-now"
+              onsubmit="return confirm('立即执行当前时段签到？')">
+            <button class="btn btn-primary btn-sm">立即签到</button>
+        </form>
+    </div>
+</div>
+
+<div class="card shadow-sm mb-3">
+    <div class="card-body">
+        <h6 class="card-title">微信推送服务</h6>
+        <p class="small text-muted mb-2">当前 SendKey：{{ sendkey_masked }}</p>
+        <form method="post" action="/me/sendkey" class="d-flex gap-2">
+            <input name="sendkey" class="form-control form-control-sm"
+                   placeholder="留空则清除">
+            <button class="btn btn-outline-primary btn-sm text-nowrap">保存</button>
+        </form>
+        <p class="small text-muted mt-2 mb-0">
+            获取 SendKey：<a href="https://sct.ftqq.com/login/" target="_blank" rel="noopener">sct.ftqq.com</a> 微信扫码登录后，在"SendKey"页面复制。
+        </p>
+    </div>
+</div>
+
+<div class="card shadow-sm">
+    <div class="card-body">
+        <h6 class="card-title">近 7 天签到记录</h6>
+        {% if logs %}
+        <table class="table table-sm table-striped mb-0">
+            <thead><tr><th>日期</th><th>时段</th><th>结果</th><th>信息</th></tr></thead>
+            <tbody>
+            {% for log in logs %}
+            <tr>
+                <td>{{ log["date"] }}</td>
+                <td>{{ "上午" if log["period"] == "am" else "下午" }}</td>
+                <td>
+                    {% set r = log["result"] %}
+                    <span class="badge bg-{{ 'success' if r == 'success' else
+                        ('danger' if r == 'failed' else
+                         ('info' if r == 'checked' else 'secondary')) }}">
+                        {{ {"success": "成功", "failed": "失败", "skipped": "已签过",
+                            "no_schedule": "无需签到", "manual": "需人工",
+                            "checked": "检测"}.get(r, r) }}
+                    </span>
+                </td>
+                <td class="small text-muted">{{ log["message"] }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p class="text-muted small mb-0">暂无记录</p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

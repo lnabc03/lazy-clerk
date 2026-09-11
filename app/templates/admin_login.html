@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}管理员登录 · lazy-clerk{% endblock %}
+{% block content %}
+<div class="card card-narrow shadow-sm">
+    <div class="card-body p-4">
+        <h4 class="text-center mb-4">lazy-clerk 管理后台</h4>
+        {% if not configured %}
+        <div class="alert alert-warning small">
+            未配置管理员密码。请在环境变量中设置 ADMIN_PASSWORD 后重启服务。
+        </div>
+        {% endif %}
+        <form method="post" action="/admin/login">
+            <div class="mb-3">
+                <label class="form-label">管理员密码</label>
+                <input name="password" type="password" class="form-control" required autofocus>
+            </div>
+            <button class="btn btn-primary w-100">登录</button>
+        </form>
+    </div>
+</div>
+{% endblock %}

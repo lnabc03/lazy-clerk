@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+data/
+ref/
+测试账号.md
+lazy-clerk-deploy.tar.gz
+.tmp*/
+*.jar
+.DS_Store

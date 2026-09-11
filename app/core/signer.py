@@ -1,0 +1,230 @@
+"""签到编排 + 重试 + 状态判定（设计稿第 4 章）。
+
+- 每个账号、每个时段独立执行，账号间失败隔离
+- 重试整体重跑主流程（会话分钟级过期，每次重新登录）
+- 停止时间：上午 7:28 / 下午 14:23（窗口关闭前留缓冲）
+- 通知去重：同一时段同一账号只推"首次（认证类）"与"最终"两次
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
+
+from .. import models
+from ..config import settings
+from .client import AuthError, HospitalClient, LoginError
+from .notify import notify, notify_user_and_admin
+
+log = logging.getLogger("lazy-clerk.signer")
+
+TZ = ZoneInfo(settings.tz)
+
+PERIOD_NAME = {"am": "上午", "pm": "下午"}
+STOP_TIME = {"am": time(7, 28), "pm": time(14, 23)}
+RETRY_INTERVAL = 300  # 秒
+
+RESULT_SUCCESS = "success"
+RESULT_FAILED = "failed"
+RESULT_SKIPPED = "skipped"       # 已签过
+RESULT_NO_SCHEDULE = "no_schedule"  # 未排班/休假
+RESULT_MANUAL = "manual"         # 需人工处理（迟到/补签/借假等）
+RESULT_CHECKED = "checked"       # 管理页手动检测（非签到动作）
+
+# 已签状态；其余非空状态（-1 借假 / -3 迟到 / -4 补签待确认 ...）均需人工
+SIGNED = {1, 10}
+
+STATUS_TEXT = {
+    None: "未签到", 0: "未签到", 1: "已签到·待确认", 10: "已确认",
+    -1: "借假", -2: "早退", -3: "迟到", -4: "补签待确认",
+    -5: "缺岗", -6: "擅自离岗", -10: "旷实习",
+}
+
+
+@dataclass
+class SignOutcome:
+    result: str
+    message: str
+    retryable: bool = False  # True 时进入重试循环
+
+
+def find_target_row(rows: list[dict], date: str, period: str) -> dict | None:
+    """定位目标行：WeekDate==当日 且 TimeName==当前时段。"""
+    for row in rows:
+        if str(row.get("WeekDate", ""))[:10] == date and row.get("TimeName") == PERIOD_NAME[period]:
+            return row
+    return None
+
+
+def decide(row: dict) -> SignOutcome:
+    """目标行状态判定（设计稿 4.1 步骤 3）。"""
+    status = row.get("SignInStatus")
+    day_off = int(row.get("DayOff") or 0)
+    if status in SIGNED:
+        return SignOutcome(RESULT_SKIPPED, f"已签到（状态 {status}），跳过")
+    if day_off > 0:
+        return SignOutcome(RESULT_MANUAL, f"补签场景（DayOff={day_off}），请人工处理")
+    if status in (None, 0):
+        return SignOutcome("sign", "待签到")  # 内部动作，不是终态
+    return SignOutcome(RESULT_MANUAL, f"状态异常（SignInStatus={status}），请人工处理")
+
+
+async def sign_user_once(user: models.User, period: str) -> SignOutcome:
+    """单账号单时段完整流程（登录 → 拉列表 → 判定 → 签到）。只跑一遍，不重试。"""
+    today = datetime.now(TZ).strftime("%Y-%m-%d")
+    try:
+        async with HospitalClient(user.account, user.password) as client:
+            await client.login()
+            rows = await client.get_attendance(today)
+            row = find_target_row(rows, today, period)
+            if row is None:
+                return SignOutcome(RESULT_NO_SCHEDULE, "今日无该时段排班，无需签到")
+            outcome = decide(row)
+            if outcome.result != "sign":
+                return outcome
+            resp = await client.sign(int(row["ID"]), status=1)
+            if str(resp.get("Success")) == "1":
+                return SignOutcome(RESULT_SUCCESS, "签到成功")
+            return SignOutcome(RESULT_FAILED, f"服务端拒绝: {resp.get('Info', resp)}",
+                               retryable=True)
+    except AuthError as e:
+        # 密码错误/账号锁定：重试无意义，首次即推
+        return SignOutcome(RESULT_FAILED, f"登录失败: {e}", retryable=False)
+    except LoginError as e:
+        return SignOutcome(RESULT_FAILED, str(e), retryable=True)
+    except Exception as e:  # 医院改版等未预期异常：可重试，告警含摘要
+        log.exception("签到流程未预期异常 user=%s", user.account)
+        return SignOutcome(RESULT_FAILED, f"未预期异常: {type(e).__name__}: {e}", retryable=True)
+
+
+def _period_label(period: str) -> str:
+    return f"{datetime.now(TZ).strftime('%m-%d')} {PERIOD_NAME[period]}"
+
+
+# 推送文案：免费版 Server 酱列表只露标题 → 状态前置进标题，正文从简
+async def push_success(user: models.User, period: str) -> None:
+    if user.sendkey:
+        await notify(f"✅签到成功｜{user.nickname}｜{_period_label(period)}",
+                     "自动签到成功。", sendkey=user.sendkey)
+
+
+async def push_final_failure(user: models.User, period: str, reason: str) -> None:
+    await notify_user_and_admin(
+        f"❌签到失败｜{user.nickname}｜{_period_label(period)}",
+        f"{reason}\n重试已耗尽，签到窗口即将关闭，请立即人工签到。", user.sendkey)
+
+
+async def push_manual_needed(user: models.User, period: str, reason: str) -> None:
+    await notify_user_and_admin(
+        f"⚠️需人工处理｜{user.nickname}｜{_period_label(period)}",
+        reason, user.sendkey)
+
+
+async def push_login_failure(user: models.User, period: str, reason: str) -> None:
+    await notify_user_and_admin(
+        f"🔒登录失败｜{user.nickname}｜{_period_label(period)}",
+        f"{reason}\n请检查密码或账号状态（可在登录页更正密码）。", user.sendkey)
+
+
+RESULT_WORD = {
+    RESULT_SUCCESS: "签到成功", RESULT_SKIPPED: "已签过", RESULT_NO_SCHEDULE: "无需签到",
+    RESULT_FAILED: "失败", RESULT_MANUAL: "需人工",
+}
+
+
+async def push_manual_result(user: models.User, period: str, outcome: SignOutcome) -> None:
+    """后台/个人页手动触发的签到（含已签过）也推送——兼作推送链路连通性探针。"""
+    await notify(
+        f"📢手动签到｜{user.nickname}｜{_period_label(period)}｜{RESULT_WORD.get(outcome.result, outcome.result)}",
+        outcome.message,
+        sendkey=user.sendkey)  # 无个人 SendKey 时回落管理员 key，保证必达
+
+
+async def sign_user_with_retry(user: models.User, period: str) -> SignOutcome:
+    """带重试的签到：成功/终态即停；可重试失败每 5 分钟重跑，超过停止时间推最终告警。"""
+    today = datetime.now(TZ).strftime("%Y-%m-%d")
+
+    while True:
+        outcome = await sign_user_once(user, period)
+
+        if outcome.result in (RESULT_SUCCESS, RESULT_SKIPPED, RESULT_NO_SCHEDULE):
+            models.add_log(user.id, today, period, outcome.result, outcome.message)
+            if outcome.result == RESULT_SUCCESS:
+                await push_success(user, period)
+            return outcome
+
+        if outcome.result == RESULT_MANUAL:
+            models.add_log(user.id, today, period, RESULT_MANUAL, outcome.message)
+            await push_manual_needed(user, period, outcome.message)
+            return outcome
+
+        # failed
+        if not outcome.retryable:
+            # 认证类失败：首次即推，不重试
+            models.add_log(user.id, today, period, RESULT_FAILED, outcome.message)
+            await push_login_failure(user, period, outcome.message)
+            return outcome
+
+        now = datetime.now(TZ).time()
+        if now >= STOP_TIME[period]:
+            models.add_log(user.id, today, period, RESULT_FAILED,
+                           f"重试耗尽: {outcome.message}")
+            await push_final_failure(user, period, outcome.message)
+            return outcome
+
+        log.info("签到失败将重试 user=%s period=%s: %s", user.account, period, outcome.message)
+        await asyncio.sleep(RETRY_INTERVAL)
+
+
+async def sign_all(period: str) -> None:
+    """定时任务入口：遍历所有启用账号，顺序执行，失败隔离。"""
+    log.info("开始 %s 时段签到", period)
+    for user in models.list_users():
+        if not user.enabled:
+            continue
+        try:
+            outcome = await sign_user_with_retry(user, period)
+            log.info("user=%s %s → %s %s", user.account, period, outcome.result, outcome.message)
+        except Exception:
+            log.exception("账号签到流程崩溃（已隔离）user=%s", user.account)
+    log.info("%s 时段签到结束", period)
+
+
+def current_period() -> str:
+    """手动签到用：按当前时间推断时段（12 点前算上午，之后算下午）。"""
+    return "am" if datetime.now(TZ).hour < 12 else "pm"
+
+
+async def check_user_status(user: models.User) -> None:
+    """管理页"签到状态检测"：登录医院系统拉取当日真实状态，写入 checked 日志。
+
+    不执行签到、不推送，只刷新状态总览。失败隔离由调用方保证。
+    """
+    today = datetime.now(TZ).strftime("%Y-%m-%d")
+    try:
+        async with HospitalClient(user.account, user.password) as client:
+            await client.login()
+            rows = await client.get_attendance(today)
+    except AuthError as e:
+        models.add_log(user.id, today, current_period(), RESULT_FAILED,
+                       f"[检测] 登录失败: {e}")
+        return
+    except Exception as e:
+        models.add_log(user.id, today, current_period(), RESULT_FAILED,
+                       f"[检测] {type(e).__name__}: {e}")
+        return
+
+    for period in ("am", "pm"):
+        row = find_target_row(rows, today, period)
+        if row is None:
+            msg = "无排班"
+        else:
+            status = row.get("SignInStatus")
+            msg = STATUS_TEXT.get(status, f"未知状态({status})")
+            if status in SIGNED and row.get("SignInTime"):
+                msg += f" {str(row['SignInTime'])[10:16]}"
+            if int(row.get("DayOff") or 0) > 0:
+                msg += "（补签场景）"
+        models.add_log(user.id, today, period, RESULT_CHECKED, f"[检测] {msg}")

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}注册 · lazy-clerk{% endblock %}
+{% block content %}
+<div class="card card-narrow shadow-sm">
+    <div class="card-body p-4">
+        <h4 class="text-center mb-1">lazy-clerk</h4>
+        <p class="text-center text-muted small mb-4">注册（需邀请码）</p>
+        <form method="post" action="/register">
+            <div class="mb-3">
+                <label class="form-label">昵称</label>
+                <input name="nickname" class="form-control" required autofocus>
+            </div>
+            <div class="mb-3">
+                <label class="form-label">工号</label>
+                <input name="account" class="form-control" required>
+            </div>
+            <div class="mb-3">
+                <label class="form-label">统一登录平台密码</label>
+                <input name="password" type="password" class="form-control" required>
+                <div class="form-text">提交前会先向医院平台验证账号密码</div>
+            </div>
+            <div class="mb-3">
+                <label class="form-label">邀请码</label>
+                <input name="invite_code" class="form-control" required>
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Server 酱 SendKey（可选）</label>
+                <input name="sendkey" class="form-control">
+            </div>
+            <button class="btn btn-primary w-100">注册</button>
+        </form>
+        <p class="text-center small mt-3 mb-0">
+            已注册？<a href="/login">去登录</a>
+            <span class="text-muted mx-1">·</span>
+            <a href="/admin/login" class="text-muted">管理员入口</a>
+        </p>
+    </div>
+</div>
+{% endblock %}
