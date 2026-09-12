@@ -1,16 +1,7 @@
-"""lazy-clerk 个人版入口（PyInstaller 单 exe）。
+"""lazy-clerk 个人版
 
-用法：
-  lazy-clerk.exe setup       首次配置向导（验证医院账号后写入 config.json）
-  lazy-clerk.exe sign        执行当前时段签到（带 5 分钟重试；计划任务调用此命令）
-  lazy-clerk.exe status      查询今日考勤状态
-  lazy-clerk.exe install     注册 Windows 计划任务（每天 6:58 / 13:58 自动签到）
-  lazy-clerk.exe uninstall   删除计划任务
-
-设计要点：
-- 核心链路（client/signer/notify/crypto）复用 app/core，与服务器版单点维护
-- 无数据库：日志写 exe 同目录 sign.log
-- 不补签：进程没跑（电脑关机/睡眠）就错过，由医院 7:00/14:00 系统提醒兜底
+双击运行进入交互模式：首次使用自动进入配置引导，之后显示今日状态与功能菜单。
+也可以在终端使用命令：lazy-clerk.exe setup | sign | status | install | uninstall
 """
 from __future__ import annotations
 
@@ -30,7 +21,10 @@ from personal.config import LOG_PATH, load, wizard  # noqa: E402
 TASK_NAMES = {"am": "lazy-clerk-sign-am", "pm": "lazy-clerk-sign-pm"}
 TASK_TIMES = {"am": "06:58", "pm": "13:58"}
 
-USAGE = __doc__
+RESULT_TEXT = {
+    "success": "签到成功", "skipped": "已经签过", "no_schedule": "今日此时段无需签到",
+    "failed": "签到失败", "manual": "需要人工处理", "sign": "待签到",
+}
 
 
 def file_log(user_id: int, date: str, period: str, result: str, message: str) -> None:
@@ -42,19 +36,21 @@ def file_log(user_id: int, date: str, period: str, result: str, message: str) ->
 def make_user() -> User:
     cfg = load()
     if cfg is None:
-        print("[错误] 未找到配置。请先运行: lazy-clerk.exe setup")
+        print("还没有配置，先运行 setup 完成首次配置。")
         sys.exit(1)
     return User(id=0, nickname=cfg.nickname, account=cfg.account,
                 password=cfg.password, sendkey=cfg.sendkey or None,
                 enabled=True, created_at="")
 
 
+# ---------- 核心动作 ----------
+
 async def cmd_sign() -> int:
     user = make_user()
     period = signer.current_period()
-    print(f"当前时段: {signer.PERIOD_NAME[period]}，开始签到流程（失败自动每 5 分钟重试）...")
+    print(f"开始{signer.PERIOD_NAME[period]}签到，失败时每 5 分钟自动重试。")
     outcome = await signer.sign_user_with_retry(user, period, log_fn=file_log)
-    print(f"结果: {outcome.result} - {outcome.message}")
+    print(f"结果：{RESULT_TEXT.get(outcome.result, outcome.result)} — {outcome.message}")
     return 0 if outcome.result != signer.RESULT_FAILED else 1
 
 
@@ -65,19 +61,19 @@ async def cmd_status() -> int:
 
     user = make_user()
     today = datetime.now(signer.TZ).strftime("%Y-%m-%d")
-    print(f"正在查询 {today} 考勤状态...")
+    print(f"正在查询 {today} 的考勤...")
     try:
         async with HospitalClient(user.account, user.password) as client:
             await client.login()
             rows = await client.get_attendance(today)
     except Exception as e:
-        print(f"[错误] 查询失败: {e}")
+        print(f"查询失败：{e}")
         return 1
     if not rows:
-        print("今日无排班记录。")
+        print("今日没有排班。")
         return 0
     print(f"{'时段':<6}{'状态':<14}{'签到时间':<10}{'科室'}")
-    print("-" * 60)
+    print("-" * 56)
     for row in rows:
         status = signer.STATUS_TEXT.get(row.get("SignInStatus"),
                                         f"未知({row.get('SignInStatus')})")
@@ -99,31 +95,122 @@ def cmd_install() -> int:
             ["schtasks", "/create", "/tn", name, "/tr", _task_cmd("sign"),
              "/sc", "daily", "/st", TASK_TIMES[period], "/f"],
             capture_output=True, text=True)
-        ok = r.returncode == 0
-        print(f"[{'成功' if ok else '失败'}] 计划任务 {name}"
-              f"（每天 {TASK_TIMES[period]}）{'' if ok else ': ' + (r.stderr or r.stdout).strip()}")
-        if not ok:
+        if r.returncode != 0:
+            print(f"注册计划任务失败：{(r.stderr or r.stdout).strip()}")
             return 1
-    print("\n完成。电脑需在签到时段处于开机状态（睡眠请合盖前注意）；"
-          "错过时段时医院系统会在 7:00/14:00 推送提醒兜底。")
+    print("自动签到已开启，每天 6:58 和 13:58 准时执行。")
+    print("请保证签到时段电脑开着；错过时医院会在 7:00 和 14:00 提醒你。")
     return 0
 
 
 def cmd_uninstall() -> int:
     for name in TASK_NAMES.values():
-        r = subprocess.run(["schtasks", "/delete", "/tn", name, "/f"],
-                           capture_output=True, text=True)
-        print(f"[{'成功' if r.returncode == 0 else '失败'}] 删除计划任务 {name}")
+        subprocess.run(["schtasks", "/delete", "/tn", name, "/f"],
+                       capture_output=True, text=True)
+    print("自动签到已关闭。")
     return 0
+
+
+def tasks_installed() -> int:
+    """返回已注册的计划任务数量（0–2）。"""
+    count = 0
+    for name in TASK_NAMES.values():
+        r = subprocess.run(["schtasks", "/query", "/tn", name],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            count += 1
+    return count
+
+
+# ---------- 交互模式 ----------
+
+def pause() -> None:
+    input("\n按回车继续...")
+
+
+async def interactive() -> int:
+    cfg = load()
+
+    # 首次运行：直接进配置引导
+    if cfg is None:
+        print("=" * 46)
+        print("  你好，欢迎使用 lazy-clerk")
+        print("  实习考勤自动签到 · 个人版")
+        print("=" * 46)
+        print("\n第一次使用，先花半分钟完成配置：\n")
+        await wizard()
+        answer = input("\n现在开启每天 6:58 / 13:58 的自动签到吗？[Y/n] ").strip().lower()
+        if answer in ("", "y", "yes"):
+            cmd_install()
+        print("\n都设置好了，祝你拥有美好的一天~")
+        pause()
+        return 0
+
+    # 已配置：状态一览 + 菜单
+    print("=" * 46)
+    print(f"  你好，{cfg.nickname}")
+    print("=" * 46)
+    await cmd_status()
+    n_tasks = tasks_installed()
+    if n_tasks == 2:
+        print("\n自动签到：已开启（每天 6:58 / 13:58）")
+    elif n_tasks == 1:
+        print("\n自动签到：异常，只注册了一个时段，建议重新开启")
+    else:
+        print("\n自动签到：未开启")
+
+    while True:
+        print("\n----------")
+        print("  1. 立即签到")
+        print("  2. 刷新状态")
+        print("  3. 更改配置")
+        print("  4. 关闭自动签到" if n_tasks > 0 else "  4. 开启自动签到")
+        print("  0. 退出")
+        choice = input("\n输入数字: ").strip()
+
+        if choice == "0":
+            print("\n祝你拥有美好的一天~")
+            pause()
+            return 0
+        elif choice == "1":
+            await cmd_sign()
+        elif choice == "2":
+            await cmd_status()
+        elif choice == "3":
+            await wizard()
+            cfg = load()
+        elif choice == "4":
+            if n_tasks > 0:
+                cmd_uninstall()
+            else:
+                cmd_install()
+            n_tasks = tasks_installed()
+        else:
+            print("输入 0-4 之间的数字。")
+            continue
+        pause()
+
+
+# ---------- 入口 ----------
+
+USAGE = """lazy-clerk 个人版
+
+用法：
+  lazy-clerk.exe            打开交互界面
+  lazy-clerk.exe setup      配置账号密码
+  lazy-clerk.exe sign       立即签到
+  lazy-clerk.exe status     查询今日考勤
+  lazy-clerk.exe install    开启每天自动签到
+  lazy-clerk.exe uninstall  关闭自动签到
+"""
 
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print(USAGE)
-        return 0
+        return asyncio.run(interactive())
     cmd = sys.argv[1].lower()
     if cmd == "setup":
-        wizard()
+        asyncio.run(wizard())
         return 0
     if cmd == "sign":
         return asyncio.run(cmd_sign())
@@ -133,7 +220,7 @@ def main() -> int:
         return cmd_install()
     if cmd == "uninstall":
         return cmd_uninstall()
-    print(f"未知命令: {cmd}\n{USAGE}")
+    print(f"未知命令：{cmd}\n\n{USAGE}")
     return 1
 
 

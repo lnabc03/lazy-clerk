@@ -4,7 +4,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import getpass
 import json
 import os
@@ -56,31 +55,31 @@ def save(cfg: PersonalConfig) -> None:
         json.dump(cfg.to_dict(), f, ensure_ascii=False, indent=2)
 
 
-def wizard() -> PersonalConfig:
-    """首次配置向导：交互输入 → 医院 SSO 真实验证 → 写入 config.json。"""
+async def wizard() -> PersonalConfig:
+    """配置向导：交互输入 → 医院 SSO 真实验证 → 写入 config.json。"""
     from app.core.client import verify_account
 
-    print("=" * 46)
-    print("  lazy-clerk 个人版 · 首次配置")
-    print("=" * 46)
-    nickname = input("昵称（用于推送标题显示）: ").strip()
+    print("-" * 46)
+    print("  配置账号")
+    print("-" * 46)
+    nickname = input("你的称呼: ").strip()
     account = input("工号: ").strip()
     # 管道/重定向输入时 getpass 会死等控制台，退化为普通 input
     if sys.stdin.isatty():
-        password = getpass.getpass("统一登录平台密码（输入不显示）: ").strip()
+        password = getpass.getpass("统一登录平台密码（输入时不显示）: ").strip()
     else:
         password = input("统一登录平台密码: ").strip()
-    sendkey = input("Server 酱 SendKey（微信推送，可留空）: ").strip()
+    sendkey = input("Server 酱 SendKey（用于微信推送，可留空）: ").strip()
 
     if not account or not password:
-        print("\n[错误] 工号和密码不能为空")
+        print("\n工号和密码不能为空。")
         sys.exit(1)
 
     print("\n正在向医院平台验证账号密码...")
-    err = asyncio.run(verify_account(account, password))
+    err = await verify_account(account, password)
     if err:
-        print(f"[错误] 医院平台认证未通过：{err}")
-        print("请确认密码后重新运行 setup。")
+        print(f"验证未通过：{err}")
+        print("请检查密码后重试。")
         sys.exit(1)
 
     cfg = PersonalConfig(
@@ -88,6 +87,5 @@ def wizard() -> PersonalConfig:
         account=account, password=password, sendkey=sendkey,
     )
     save(cfg)
-    print(f"\n[完成] 配置已写入 {CONFIG_PATH}")
-    print("下一步：lazy-clerk.exe install   注册每日自动签到计划任务")
+    print("\n验证通过，配置已保存。")
     return cfg
