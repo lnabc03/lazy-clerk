@@ -8,24 +8,10 @@ from __future__ import annotations
 from fastapi import APIRouter, Form, Request
 
 from .. import models
-from ..core.client import AuthError, HospitalClient, LoginError
+from ..core.client import verify_account
 from .common import redirect, render
 
 router = APIRouter()
-
-
-async def verify_hospital_account(account: str, password: str) -> str | None:
-    """对医院 SSO 做一次真实认证。通过返回 None，否则返回可读错误信息。"""
-    try:
-        async with HospitalClient(account, password) as client:
-            await client.login()
-        return None
-    except AuthError as e:
-        return str(e)
-    except LoginError as e:
-        return f"医院平台连接异常: {e}"
-    except Exception as e:
-        return f"验证异常: {type(e).__name__}: {e}"
 
 
 @router.get("/register")
@@ -51,7 +37,7 @@ async def register_submit(
         return redirect("/register", error="该账号已注册")
 
     # 先验证医院账号密码，通过才允许注册
-    err = await verify_hospital_account(account, password)
+    err = await verify_account(account, password)
     if err:
         return redirect("/register", error=f"医院平台认证未通过：{err}")
 

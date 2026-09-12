@@ -137,3 +137,17 @@ class HospitalClient:
         except httpx.HTTPError as e:
             raise LoginError(f"签到请求失败: {e}") from e
         return r.json()
+
+
+async def verify_account(account: str, password: str) -> str | None:
+    """对医院 SSO 做一次真实认证（注册/配置向导用）。通过返回 None，否则返回可读错误。"""
+    try:
+        async with HospitalClient(account, password) as client:
+            await client.login()
+        return None
+    except AuthError as e:
+        return str(e)
+    except LoginError as e:
+        return f"医院平台连接异常: {e}"
+    except Exception as e:
+        return f"验证异常: {type(e).__name__}: {e}"

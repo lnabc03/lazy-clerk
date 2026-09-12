@@ -57,7 +57,7 @@ async def change_password(request: Request, account: str = Form(...),
     该密码同时是本站登录凭据与医院签到凭据。先对 SSO 认证新密码，
     通过才更新入库——与注册同一套验证逻辑。
     """
-    from .register import verify_hospital_account
+    from ..core.client import verify_account
 
     account = account.strip()
     if len(password) < 4 or password != password2:
@@ -65,7 +65,7 @@ async def change_password(request: Request, account: str = Form(...),
     user = models.get_user_by_account(account)
     if not user:
         return redirect("/login", error="该账号未注册")
-    err = await verify_hospital_account(account, password)
+    err = await verify_account(account, password)
     if err:
         return redirect("/login", error=f"医院平台认证未通过：{err}")
     models.update_password(user.id, password)

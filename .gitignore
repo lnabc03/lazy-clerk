@@ -9,3 +9,9 @@ lazy-clerk-deploy.tar.gz
 .tmp*/
 *.jar
 .DS_Store
+# 个人版
+build/
+dist/
+*.spec
+config.json
+sign.log

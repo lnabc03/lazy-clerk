@@ -22,6 +22,11 @@ log = logging.getLogger("lazy-clerk.signer")
 
 TZ = ZoneInfo(settings.tz)
 
+# 日志回调签名：(user_id, date, period, result, message)
+from typing import Callable  # noqa: E402
+
+LogFn = Callable[[int, str, str, str, str], None]
+
 PERIOD_NAME = {"am": "上午", "pm": "下午"}
 STOP_TIME = {"am": time(7, 28), "pm": time(14, 23)}
 RETRY_INTERVAL = 300  # 秒
@@ -142,35 +147,45 @@ async def push_manual_result(user: models.User, period: str, outcome: SignOutcom
         sendkey=user.sendkey)  # 无个人 SendKey 时回落管理员 key，保证必达
 
 
-async def sign_user_with_retry(user: models.User, period: str) -> SignOutcome:
-    """带重试的签到：成功/终态即停；可重试失败每 5 分钟重跑，超过停止时间推最终告警。"""
+async def sign_user_with_retry(
+    user: models.User,
+    period: str,
+    log_fn: "LogFn | None" = None,
+) -> SignOutcome:
+    """带重试的签到：成功/终态即停；可重试失败每 5 分钟重跑，超过停止时间推最终告警。
+
+    log_fn(user_id, date, period, result, message)：日志落库回调，
+    默认写 SQLite；个人版传入文件日志即可脱离数据库运行。
+    """
+    if log_fn is None:
+        log_fn = lambda uid, date, p, result, msg: models.add_log(uid, date, p, result, msg)  # noqa: E731
     today = datetime.now(TZ).strftime("%Y-%m-%d")
 
     while True:
         outcome = await sign_user_once(user, period)
 
         if outcome.result in (RESULT_SUCCESS, RESULT_SKIPPED, RESULT_NO_SCHEDULE):
-            models.add_log(user.id, today, period, outcome.result, outcome.message)
+            log_fn(user.id, today, period, outcome.result, outcome.message)
             if outcome.result == RESULT_SUCCESS:
                 await push_success(user, period)
             return outcome
 
         if outcome.result == RESULT_MANUAL:
-            models.add_log(user.id, today, period, RESULT_MANUAL, outcome.message)
+            log_fn(user.id, today, period, RESULT_MANUAL, outcome.message)
             await push_manual_needed(user, period, outcome.message)
             return outcome
 
         # failed
         if not outcome.retryable:
             # 认证类失败：首次即推，不重试
-            models.add_log(user.id, today, period, RESULT_FAILED, outcome.message)
+            log_fn(user.id, today, period, RESULT_FAILED, outcome.message)
             await push_login_failure(user, period, outcome.message)
             return outcome
 
         now = datetime.now(TZ).time()
         if now >= STOP_TIME[period]:
-            models.add_log(user.id, today, period, RESULT_FAILED,
-                           f"重试耗尽: {outcome.message}")
+            log_fn(user.id, today, period, RESULT_FAILED,
+                   f"重试耗尽: {outcome.message}")
             await push_final_failure(user, period, outcome.message)
             return outcome
 
