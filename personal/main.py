@@ -50,6 +50,9 @@ async def cmd_sign() -> int:
     period = signer.current_period()
     print(f"开始{signer.PERIOD_NAME[period]}签到，失败时每 5 分钟自动重试。")
     outcome = await signer.sign_user_with_retry(user, period, log_fn=file_log)
+    # 用户主动触发的签到无论结果如何都推送，兼作微信推送的连通性确认
+    if outcome.result != signer.RESULT_SUCCESS:  # success 时重试函数内已推过
+        await signer.push_manual_result(user, period, outcome)
     print(f"结果：{RESULT_TEXT.get(outcome.result, outcome.result)} — {outcome.message}")
     return 0 if outcome.result != signer.RESULT_FAILED else 1
 
