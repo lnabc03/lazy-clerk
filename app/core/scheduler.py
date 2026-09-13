@@ -25,9 +25,11 @@ def _cleanup_logs() -> None:
 
 
 def start() -> None:
-    scheduler.add_job(signer.sign_all, CronTrigger(hour=6, minute=58), args=["am"],
+    # 拟人化：触发时间在 6:57/13:57 ±3 分钟内随机（6:54–7:00、13:54–14:00），
+    # 避开整点机械特征，且始终落在签到窗口内、早于医院 7:00/14:00 系统提醒
+    scheduler.add_job(signer.sign_all, CronTrigger(hour=6, minute=57, jitter=180), args=["am"],
                       id="sign_am", name="上午签到")
-    scheduler.add_job(signer.sign_all, CronTrigger(hour=13, minute=58), args=["pm"],
+    scheduler.add_job(signer.sign_all, CronTrigger(hour=13, minute=57, jitter=180), args=["pm"],
                       id="sign_pm", name="下午签到")
     scheduler.add_job(_cleanup_logs, CronTrigger(hour=3, minute=30),
                       id="cleanup", name="日志清理")

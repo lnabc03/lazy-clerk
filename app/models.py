@@ -181,9 +181,11 @@ def add_log(user_id: int, date: str, period: str, result: str, message: str = ""
 
 
 def logs_for_user(user_id: int, days: int = 7) -> list[sqlite3.Row]:
+    """近 N 天日志，按操作时间倒序（新→旧）。"""
     since = (datetime.now(TZ) - timedelta(days=days)).strftime("%Y-%m-%d")
     return conn().execute(
-        "SELECT * FROM sign_logs WHERE user_id=? AND date>=? ORDER BY date DESC, period",
+        "SELECT * FROM sign_logs WHERE user_id=? AND date>=?"
+        " ORDER BY created_at DESC, id DESC",
         (user_id, since),
     ).fetchall()
 

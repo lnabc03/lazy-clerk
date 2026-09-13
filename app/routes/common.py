@@ -78,16 +78,16 @@ def mask_sendkey(sendkey: str | None) -> str:
 
 
 def next_run_text() -> str:
-    """下次执行时间：下一个 6:58 或 13:58。"""
+    """下次执行时间：下一个 6:57 或 13:57（实际触发在其前后 3 分钟内随机）。"""
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
 
     from ..config import settings
 
     now = datetime.now(ZoneInfo(settings.tz))
-    for candidate in (now.replace(hour=6, minute=58, second=0, microsecond=0),
-                      now.replace(hour=13, minute=58, second=0, microsecond=0)):
+    for candidate in (now.replace(hour=6, minute=57, second=0, microsecond=0),
+                      now.replace(hour=13, minute=57, second=0, microsecond=0)):
         if candidate > now:
-            return candidate.strftime("%Y-%m-%d %H:%M")
-    return (now.replace(hour=6, minute=58, second=0, microsecond=0)
-            + timedelta(days=1)).strftime("%Y-%m-%d %H:%M")
+            return candidate.strftime("约 %Y-%m-%d %H:%M")
+    return (now.replace(hour=6, minute=57, second=0, microsecond=0)
+            + timedelta(days=1)).strftime("约 %Y-%m-%d %H:%M")

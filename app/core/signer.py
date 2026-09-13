@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from dataclasses import dataclass
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
@@ -190,15 +191,20 @@ async def sign_user_with_retry(
             return outcome
 
         log.info("签到失败将重试 user=%s period=%s: %s", user.account, period, outcome.message)
-        await asyncio.sleep(RETRY_INTERVAL)
+        # 拟人化：重试间隔 5 分钟 ±1 分钟随机
+        await asyncio.sleep(RETRY_INTERVAL + random.uniform(-60, 60))
 
 
 async def sign_all(period: str) -> None:
     """定时任务入口：遍历所有启用账号，顺序执行，失败隔离。"""
     log.info("开始 %s 时段签到", period)
-    for user in models.list_users():
-        if not user.enabled:
-            continue
+    users = [u for u in models.list_users() if u.enabled]
+    for i, user in enumerate(users):
+        if i:
+            # 拟人化：账号间随机间隔 10–40 秒，避免多账号同一秒齐发命中风控
+            delay = random.uniform(10, 40)
+            log.info("账号间随机间隔 %.0f 秒", delay)
+            await asyncio.sleep(delay)
         try:
             outcome = await sign_user_with_retry(user, period)
             log.info("user=%s %s → %s %s", user.account, period, outcome.result, outcome.message)
