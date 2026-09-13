@@ -86,8 +86,16 @@ def cmd_web() -> int:
     from app import db, models
 
     db.init()
-    if not models.get_setting("admin_password_hash"):
+    first_run = not models.get_setting("admin_password_hash")
+    if first_run:
         _seed_admin()
+        answer = input("现在开启每天的自动签到吗？[Y/n] ").strip().lower()
+        if answer in ("", "y", "yes"):
+            cmd_install()
+
+    from app.core import wintasks
+    if not all(wintasks.exists(name) for name, _ in TASKS.values()):
+        print("提示：自动签到未开启，终端执行 lazy-clerk-dorm.exe install 开启。\n")
 
     from dorm.web import app, open_browser_later
 

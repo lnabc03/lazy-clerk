@@ -115,6 +115,9 @@ async def logout(request: Request):
 async def admin_page(request: Request, msg: str = "", error: str = ""):
     if not is_admin(request):
         return redirect("/admin/login")
+    from app.core import wintasks
+    from dorm.main import TASKS
+    n_tasks = sum(1 for name, _ in TASKS.values() if wintasks.exists(name))
     today = models.today_results()
     users = [{
         "user": u,
@@ -127,6 +130,7 @@ async def admin_page(request: Request, msg: str = "", error: str = ""):
     return render(request, "admin.html", msg=msg, error=error,
                   users=users,
                   logs=models.recent_logs(50),
+                  n_tasks=n_tasks,
                   period_text=PERIOD_TEXT,
                   log_result_text=LOG_RESULT_TEXT,
                   log_result_color=LOG_RESULT_COLOR,

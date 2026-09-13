@@ -16,8 +16,8 @@
 ## 安装（管理员操作）
 
 1. 把 `lazy-clerk-dorm.exe` 放进一个固定目录，比如 `D:\tools\lazy-clerk-dorm\`
-2. 双击 exe：首次运行引导设置管理员密码和 SendKey，随后自动打开管理页
-3. 在终端执行一次 `lazy-clerk-dorm.exe install`，注册每天的自动签到任务
+2. 双击 exe：首次运行引导设置管理员密码和 SendKey，并询问是否开启自动签到
+3. 在管理页顶部确认"自动签到：已开启"；未开启时在终端执行 `lazy-clerk-dorm.exe install`
 4. 在管理页逐个添加舍友账号：填昵称、工号、密码，添加前会先向医院平台验证
 
 ## 使用
