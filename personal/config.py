@@ -69,7 +69,8 @@ async def wizard() -> PersonalConfig:
         password = getpass.getpass("统一登录平台密码（输入时不显示）: ").strip()
     else:
         password = input("统一登录平台密码: ").strip()
-    sendkey = input("Server 酱 SendKey（用于微信推送，可留空）: ").strip()
+    print("微信推送教程：https://sct.ftqq.com/login/ 扫码登录即可获取 SendKey")
+    sendkey = input("Server 酱 SendKey（可留空）: ").strip()
 
     if not account or not password:
         print("\n工号和密码不能为空。")

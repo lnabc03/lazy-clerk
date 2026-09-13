@@ -29,8 +29,10 @@ RESULT_TEXT = {
 
 def file_log(user_id: int, date: str, period: str, result: str, message: str) -> None:
     """signer 的日志回调：个人版写本地文件。"""
+    from datetime import datetime
+    now = datetime.now().strftime("%H:%M:%S")
     with open(LOG_PATH, "a", encoding="utf-8") as f:
-        f.write(f"{date} {period} [{result}] {message}\n")
+        f.write(f"{date} {now} {period} [{result}] {message}\n")
 
 
 def make_user() -> User:
@@ -92,6 +94,20 @@ def _task_cmd(action: str) -> str:
     return f'"{sys.executable}" "{os.path.abspath(__file__)}" {action}'
 
 
+def _enable_wakeup(name: str) -> bool:
+    """给计划任务开启睡眠唤醒与错过补跑（schtasks 命令行不支持，走 PowerShell）。
+
+    锁屏不影响任务运行（schtasks 默认方式创建即可），这里只补唤醒相关设置。
+    """
+    ps = (f"$t = Get-ScheduledTask -TaskName '{name}'; "
+          f"$t.Settings.WakeToRun = $true; "
+          f"$t.Settings.StartWhenAvailable = $true; "
+          f"Set-ScheduledTask -InputObject $t | Out-Null")
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                       capture_output=True, text=True)
+    return r.returncode == 0
+
+
 def cmd_install() -> int:
     for period, name in TASK_NAMES.items():
         r = subprocess.run(
@@ -101,8 +117,11 @@ def cmd_install() -> int:
         if r.returncode != 0:
             print(f"注册计划任务失败：{(r.stderr or r.stdout).strip()}")
             return 1
+        if not _enable_wakeup(name):
+            print("睡眠唤醒开启失败（不影响锁屏签到），电脑睡眠时可能错过签到。")
     print("自动签到已开启，每天 6:58 和 13:58 准时执行。")
-    print("请保证签到时段电脑开着；错过时医院会在 7:00 和 14:00 提醒你。")
+    print("锁屏不影响签到；电脑插电时睡眠会自动唤醒执行。")
+    print("错过时医院会在 7:00 和 14:00 提醒你。")
     return 0
 
 
