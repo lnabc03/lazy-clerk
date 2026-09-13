@@ -25,11 +25,12 @@ def _cleanup_logs() -> None:
 
 
 def start() -> None:
-    # 拟人化：触发时间在 6:57/13:57 ±3 分钟内随机（6:54–7:00、13:54–14:00），
-    # 避开整点机械特征，且始终落在签到窗口内、早于医院 7:00/14:00 系统提醒
-    scheduler.add_job(signer.sign_all, CronTrigger(hour=6, minute=57, jitter=180), args=["am"],
+    # 拟人化：触发时间在基准点后 0–5 分钟内随机（jitter 只加不减，见
+    # APScheduler _apply_jitter），即 6:53–6:58、13:53–13:58。
+    # 上限不晚于 :58——签到约花 10 秒，保证 7:00/14:00 医院系统提醒发出前已完成
+    scheduler.add_job(signer.sign_all, CronTrigger(hour=6, minute=53, jitter=300), args=["am"],
                       id="sign_am", name="上午签到")
-    scheduler.add_job(signer.sign_all, CronTrigger(hour=13, minute=57, jitter=180), args=["pm"],
+    scheduler.add_job(signer.sign_all, CronTrigger(hour=13, minute=53, jitter=300), args=["pm"],
                       id="sign_pm", name="下午签到")
     scheduler.add_job(_cleanup_logs, CronTrigger(hour=3, minute=30),
                       id="cleanup", name="日志清理")
