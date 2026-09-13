@@ -195,6 +195,20 @@ async def sign_user_with_retry(
         await asyncio.sleep(RETRY_INTERVAL + random.uniform(-60, 60))
 
 
+async def sign_user_manual(user: models.User, log_prefix: str = "[手动]") -> SignOutcome:
+    """Web 手动触发的单账号签到（公网版 /me 与管理页、宿舍版管理页共用）。
+
+    单次尝试而非带重试——HTTP 请求不能挂起半小时；
+    推送必发，兼作推送链路的连通性探针。个人版手动签到走 with_retry（交互菜单等得起）。
+    """
+    period = current_period()
+    outcome = await sign_user_once(user, period)
+    today = datetime.now(TZ).strftime("%Y-%m-%d")
+    models.add_log(user.id, today, period, outcome.result, f"{log_prefix} {outcome.message}")
+    await push_manual_result(user, period, outcome)
+    return outcome
+
+
 async def sign_all(period: str) -> None:
     """定时任务入口：遍历所有启用账号，顺序执行，失败隔离。"""
     log.info("开始 %s 时段签到", period)

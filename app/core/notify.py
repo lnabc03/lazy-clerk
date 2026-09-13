@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Callable
 
 import httpx
 
@@ -9,12 +10,31 @@ from ..config import settings
 
 log = logging.getLogger("lazy-clerk.notify")
 
-
-async def notify(title: str, msg: str, sendkey: str | None = None) -> bool:
-    """推送消息。优先级：参数 sendkey > 管理页配置的 SendKey > 环境变量；都无则记录告警。"""
+def _default_admin_key() -> str | None:
     from .. import models  # 延迟 import 避免循环
 
-    key = sendkey or models.get_setting("serverchan_sendkey") or settings.serverchan_sendkey
+    return models.get_setting("serverchan_sendkey") or settings.serverchan_sendkey or None
+
+
+# 默认走数据库/.env（公网版、宿舍版）；个人版启动时显式关闭
+_admin_key_resolver: Callable[[], str | None] | None = _default_admin_key
+
+
+def set_admin_key_resolver(resolver: Callable[[], str | None] | None) -> None:
+    """替换管理员 SendKey 的回退来源；传 None 表示无管理员兜底（个人版）。"""
+    global _admin_key_resolver
+    _admin_key_resolver = resolver
+
+
+def _admin_key() -> str | None:
+    if _admin_key_resolver is None:
+        return None
+    return _admin_key_resolver()
+
+
+async def notify(title: str, msg: str, sendkey: str | None = None) -> bool:
+    """推送消息。优先级：参数 sendkey > 管理员 SendKey 回退；都无则记录告警。"""
+    key = sendkey or _admin_key()
     if not key:
         log.warning("未配置 SendKey，跳过推送: %s", title)
         return False

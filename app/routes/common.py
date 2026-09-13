@@ -35,7 +35,8 @@ def is_admin(request: Request) -> bool:
     return bool(request.session.get("admin"))
 
 
-# ---------- /login 防爆破限流：同一 IP 1 分钟内失败 5 次锁 10 分钟（内存计数） ----------
+# ---------- 登录防爆破限流：同一 IP 1 分钟内失败 5 次锁 10 分钟（内存计数） ----------
+# scope 区分入口（用户登录 / 管理员登录），互不影响
 
 _FAIL_WINDOW = 60
 _FAIL_LIMIT = 5
@@ -45,25 +46,27 @@ _failures: dict[str, list[float]] = {}
 _locked_until: dict[str, float] = {}
 
 
-def login_locked(ip: str) -> int:
+def login_locked(ip: str, scope: str = "user") -> int:
     """返回剩余锁定秒数，未锁定返回 0。"""
-    until = _locked_until.get(ip, 0)
+    until = _locked_until.get(f"{scope}:{ip}", 0)
     return max(0, int(until - time.time()))
 
 
-def record_login_failure(ip: str) -> None:
+def record_login_failure(ip: str, scope: str = "user") -> None:
+    key = f"{scope}:{ip}"
     now = time.time()
-    fails = [t for t in _failures.get(ip, []) if now - t < _FAIL_WINDOW]
+    fails = [t for t in _failures.get(key, []) if now - t < _FAIL_WINDOW]
     fails.append(now)
-    _failures[ip] = fails
+    _failures[key] = fails
     if len(fails) >= _FAIL_LIMIT:
-        _locked_until[ip] = now + _LOCK_SECONDS
-        _failures.pop(ip, None)
+        _locked_until[key] = now + _LOCK_SECONDS
+        _failures.pop(key, None)
 
 
-def clear_login_failures(ip: str) -> None:
-    _failures.pop(ip, None)
-    _locked_until.pop(ip, None)
+def clear_login_failures(ip: str, scope: str = "user") -> None:
+    key = f"{scope}:{ip}"
+    _failures.pop(key, None)
+    _locked_until.pop(key, None)
 
 
 def mask_account(account: str) -> str:
@@ -75,6 +78,31 @@ def mask_sendkey(sendkey: str | None) -> str:
     if not sendkey:
         return "未设置"
     return sendkey[:6] + "***" if len(sendkey) > 6 else "***"
+
+
+# ---------- 管理页账号总览徽标（公网版/宿舍版共用） ----------
+
+RESULT_LABEL = {
+    "success": "成功", "failed": "失败", "skipped": "已签过",
+    "no_schedule": "无需签到", "manual": "需人工",
+}
+RESULT_COLOR = {
+    "success": "success", "skipped": "success", "no_schedule": "success",
+    "failed": "danger", "manual": "warning",
+}
+
+
+def make_badge(log) -> dict | None:
+    """把一条日志转成徽标显示。checked（状态检测）直接显示真实状态文本。"""
+    if log is None:
+        return None
+    result, message = log["result"], (log["message"] or "")
+    if result == "checked":
+        text = message.replace("[检测] ", "")
+        good = any(k in text for k in ("已签到", "已确认", "无排班"))
+        return {"text": text, "color": "success" if good else "danger", "title": message}
+    return {"text": RESULT_LABEL.get(result, result),
+            "color": RESULT_COLOR.get(result, "secondary"), "title": message}
 
 
 def next_run_text() -> str:

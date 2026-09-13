@@ -105,6 +105,11 @@ def cmd_install() -> int:
 
     entry = os.path.abspath(__file__)
     for period, (name, hhmm) in TASKS.items():
+        conflict = wintasks.conflicts_with(name, entry)
+        if conflict:
+            print(f"计划任务 {name} 已存在且指向其他程序：{conflict}")
+            print("这台电脑可能装过另一形态，请先卸载旧的再开启。")
+            return 1
         err = wintasks.create_daily(name, hhmm, f"sign {period}", entry)
         if err:
             print(f"注册计划任务失败：{err}")

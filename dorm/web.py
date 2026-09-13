@@ -10,7 +10,6 @@ import os
 import sys
 import threading
 import webbrowser
-from datetime import datetime
 
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import JSONResponse
@@ -23,8 +22,9 @@ from app import models
 from app.config import settings
 from app.core import signer
 from app.core.client import verify_account
-from app.routes.admin import make_badge
-from app.routes.common import is_admin, mask_account, mask_sendkey, redirect
+from app.routes.common import (clear_login_failures, is_admin, login_locked,
+                               make_badge, mask_account, mask_sendkey,
+                               record_login_failure, redirect)
 
 log = logging.getLogger("lazy-clerk.dorm")
 
@@ -92,9 +92,15 @@ async def login_page(request: Request, msg: str = "", error: str = ""):
 
 @app.post("/admin/login")
 async def login_submit(request: Request, password: str = Form(...)):
+    ip = request.client.host if request.client else "unknown"
+    locked = login_locked(ip, scope="admin")
+    if locked:
+        return redirect("/admin/login", error=f"失败次数过多，请 {locked // 60 + 1} 分钟后再试")
     stored = models.get_setting("admin_password_hash")
     if not stored or models.sha256(password) != stored:
+        record_login_failure(ip, scope="admin")
         return redirect("/admin/login", error="密码错误")
+    clear_login_failures(ip, scope="admin")
     request.session.clear()
     request.session["admin"] = True
     return redirect("/admin")
@@ -208,11 +214,7 @@ async def sign_now(request: Request, user_id: int):
     user = models.get_user(user_id)
     if not user:
         return redirect("/admin", error="用户不存在")
-    period = signer.current_period()
-    outcome = await signer.sign_user_once(user, period)
-    today = datetime.now(signer.TZ).strftime("%Y-%m-%d")
-    models.add_log(user.id, today, period, outcome.result, f"[管理员手动] {outcome.message}")
-    await signer.push_manual_result(user, period, outcome)  # 手动触发必推，兼测连通性
+    outcome = await signer.sign_user_manual(user, log_prefix="[管理员手动]")
     if outcome.result in (signer.RESULT_SUCCESS, signer.RESULT_SKIPPED, signer.RESULT_NO_SCHEDULE):
         return redirect("/admin", msg=f"{user.nickname}: {outcome.message}")
     return redirect("/admin", error=f"{user.nickname}: {outcome.message}")

@@ -4,8 +4,6 @@
 """
 from __future__ import annotations
 
-from datetime import datetime
-
 from fastapi import APIRouter, Form, Request
 
 from .. import models
@@ -103,11 +101,7 @@ async def sign_now(request: Request):
     user = current_user(request)
     if not user:
         return redirect("/login")
-    period = signer.current_period()
-    outcome = await signer.sign_user_once(user, period)
-    today = datetime.now(signer.TZ).strftime("%Y-%m-%d")
-    models.add_log(user.id, today, period, outcome.result, f"[手动] {outcome.message}")
-    await signer.push_manual_result(user, period, outcome)  # 手动触发必推，兼测连通性
+    outcome = await signer.sign_user_manual(user)
     if outcome.result in (signer.RESULT_SUCCESS, signer.RESULT_SKIPPED, signer.RESULT_NO_SCHEDULE):
         return redirect("/me", msg=outcome.message)
     return redirect("/me", error=outcome.message)

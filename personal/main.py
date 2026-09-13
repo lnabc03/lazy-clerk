@@ -13,9 +13,12 @@ import sys
 if not getattr(sys, "frozen", False):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.core import signer, wintasks  # noqa: E402
+from app.core import notify, signer, wintasks  # noqa: E402
 from app.models import User  # noqa: E402
 from personal.config import LOG_PATH, load, wizard  # noqa: E402
+
+# 个人版无数据库：关闭推送的管理员兜底回退，否则兜底会无谓地初始化 SQLite
+notify.set_admin_key_resolver(None)
 
 TASK_NAMES = {"am": "lazy-clerk-sign-am", "pm": "lazy-clerk-sign-pm"}
 TASK_TIMES = {"am": "06:58", "pm": "13:58"}
@@ -26,10 +29,27 @@ RESULT_TEXT = {
 }
 
 
+LOG_MAX_BYTES = 512 * 1024  # sign.log 上限，超出保留尾部一半（服务器/宿舍版有 90 天清理，个人版靠这个）
+
+
+def _trim_log() -> None:
+    try:
+        if os.path.getsize(LOG_PATH) <= LOG_MAX_BYTES:
+            return
+        with open(LOG_PATH, "rb") as f:
+            f.seek(-(LOG_MAX_BYTES // 2), os.SEEK_END)
+            tail = f.read()
+        with open(LOG_PATH, "wb") as f:
+            f.write(tail)
+    except OSError:
+        pass
+
+
 def file_log(user_id: int, date: str, period: str, result: str, message: str) -> None:
     """signer 的日志回调：个人版写本地文件。"""
     from datetime import datetime
     now = datetime.now().strftime("%H:%M:%S")
+    _trim_log()
     with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(f"{date} {now} {period} [{result}] {message}\n")
 
@@ -88,6 +108,11 @@ async def cmd_status() -> int:
 
 def cmd_install() -> int:
     for period, name in TASK_NAMES.items():
+        conflict = wintasks.conflicts_with(name, os.path.abspath(__file__))
+        if conflict:
+            print(f"计划任务 {name} 已存在且指向其他程序：{conflict}")
+            print("这台电脑可能装过另一形态，请先卸载旧的再开启。")
+            return 1
         err = wintasks.create_daily(name, TASK_TIMES[period], "sign",
                                     os.path.abspath(__file__))
         if err:

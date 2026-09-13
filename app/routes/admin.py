@@ -1,38 +1,16 @@
 """管理员路由：登录、账号总览、启用/停用、删除、邀请码、签到状态检测、手动签到。"""
 from __future__ import annotations
 
-from datetime import datetime
-
 from fastapi import APIRouter, Form, Request
 
 from .. import models
 from ..config import settings
 from ..core import signer
-from .common import is_admin, mask_account, mask_sendkey, redirect, render
+from .common import (clear_login_failures, is_admin, login_locked,
+                     make_badge, mask_account, mask_sendkey,
+                     record_login_failure, redirect, render)
 
 router = APIRouter(prefix="/admin")
-
-RESULT_LABEL = {
-    "success": "成功", "failed": "失败", "skipped": "已签过",
-    "no_schedule": "无需签到", "manual": "需人工",
-}
-RESULT_COLOR = {
-    "success": "success", "skipped": "success", "no_schedule": "success",
-    "failed": "danger", "manual": "warning",
-}
-
-
-def make_badge(log) -> dict | None:
-    """把一条日志转成徽标显示。checked（状态检测）直接显示真实状态文本。"""
-    if log is None:
-        return None
-    result, message = log["result"], (log["message"] or "")
-    if result == "checked":
-        text = message.replace("[检测] ", "")
-        good = any(k in text for k in ("已签到", "已确认", "无排班"))
-        return {"text": text, "color": "success" if good else "danger", "title": message}
-    return {"text": RESULT_LABEL.get(result, result),
-            "color": RESULT_COLOR.get(result, "secondary"), "title": message}
 
 
 @router.get("/login")
@@ -43,11 +21,17 @@ async def admin_login_page(request: Request, msg: str = "", error: str = ""):
 
 @router.post("/login")
 async def admin_login(request: Request, password: str = Form(...)):
+    ip = request.client.host if request.client else "unknown"
+    locked = login_locked(ip, scope="admin")
+    if locked:
+        return redirect("/admin/login", error=f"失败次数过多，请 {locked // 60 + 1} 分钟后再试")
     stored = models.get_setting("admin_password_hash")
     if not stored:
         return redirect("/admin/login", error="未配置管理员密码（ADMIN_PASSWORD）")
     if models.sha256(password) != stored:
+        record_login_failure(ip, scope="admin")
         return redirect("/admin/login", error="密码错误")
+    clear_login_failures(ip, scope="admin")
     request.session.clear()
     request.session["admin"] = True
     return redirect("/admin")
@@ -164,11 +148,7 @@ async def admin_sign_now(request: Request, user_id: int):
     user = models.get_user(user_id)
     if not user:
         return redirect("/admin", error="用户不存在")
-    period = signer.current_period()
-    outcome = await signer.sign_user_once(user, period)
-    today = datetime.now(signer.TZ).strftime("%Y-%m-%d")
-    models.add_log(user.id, today, period, outcome.result, f"[管理员手动] {outcome.message}")
-    await signer.push_manual_result(user, period, outcome)  # 手动触发必推，兼测连通性
+    outcome = await signer.sign_user_manual(user, log_prefix="[管理员手动]")
     if outcome.result in (signer.RESULT_SUCCESS, signer.RESULT_SKIPPED, signer.RESULT_NO_SCHEDULE):
         return redirect("/admin", msg=f"{user.nickname}: {outcome.message}")
     return redirect("/admin", error=f"{user.nickname}: {outcome.message}")

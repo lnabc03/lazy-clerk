@@ -493,7 +493,7 @@ TZ=Asia/Shanghai
 ### 15.2 架构：双进程解耦
 
 - **签到执行器**：Windows 计划任务 6:53/13:53 拉起 `lazy-clerk-dorm.exe sign am|pm`，
-  进程内随机 sleep 0–300s（上限卡死 :58，同公网版 12.1 的约束），跑完即退；
+  进程内随机 sleep 0–300s（上限卡死 :58（见 2.6 签到时间窗与系统提醒）），跑完即退；
   顺带清理 90 天旧日志。无常驻进程，Web 崩溃不影响签到
 - **管理 Web**：仅管理员，127.0.0.1:8787，随用随开（双击 exe 或 start-web.bat），
   首次运行命令行引导播种管理员密码与 SendKey（此后管理页修改）
@@ -505,3 +505,19 @@ TZ=Asia/Shanghai
 - 相比公网版：无用户侧（注册页/登录页/me 页/邀请码全砍），无 APScheduler，
   无 Docker；账号管理（增删改、SendKey）全部管理员代录，新增/改密码先过医院 SSO 验证
 - 计划任务助手 `app/core/wintasks.py` 为个人版/宿舍版共用（唤醒、补跑、锁屏运行）
+
+### 15.4 三分支一致性约定
+
+**必须一致（改 `app/core` 即三版同步）**：登录链路、考勤接口、签到判定、重试策略、
+推送文案与回退、状态码映射。医院系统改版只改 `app/core/client.py`。
+
+**有意不同（勿"对齐"）**：
+
+- 触发时间：公网/宿舍 6:53–6:58 随机（拟人化防风控）；个人版 6:58 准点
+  （家庭正常 IP 无风控问题，且与 README 承诺一致）
+- 推送回退：公网/宿舍有管理员兜底（`notify` 默认解析器走 DB/.env）；
+  个人版无数据库，启动时 `set_admin_key_resolver(None)` 关闭兜底
+- 手动签到：Web（公网/宿舍）单次尝试走 `signer.sign_user_manual`（HTTP 不能挂起）；
+  个人版菜单走 `sign_user_with_retry`（交互等得起）
+- 日志清理：公网 APScheduler 每日清理；宿舍签到任务顺带清理；个人版 sign.log 超 512KB 截断
+- 管理页徽标渲染共用 `app/routes/common.py` 的 `make_badge`，勿在分支里另抄

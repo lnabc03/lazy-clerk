@@ -5,6 +5,7 @@ schtasks 默认方式（不加 /it）创建的任务锁屏下照常运行；
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 
@@ -47,3 +48,28 @@ def exists(name: str) -> bool:
     r = subprocess.run(["schtasks", "/query", "/tn", name],
                        capture_output=True, text=True)
     return r.returncode == 0
+
+
+def existing_action(name: str) -> str | None:
+    """已存在任务的执行命令；任务不存在返回 None。"""
+    ps = (f"$t = Get-ScheduledTask -TaskName '{name}' -ErrorAction SilentlyContinue; "
+          f"if ($t) {{ ($t.Actions | ForEach-Object {{ $_.Execute + ' ' + $_.Arguments }}) -join ' ' }}")
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip() or None
+
+
+def conflicts_with(name: str, entry_script: str) -> str | None:
+    """任务已存在且指向别的程序时返回其命令（另一形态冲突），否则 None。
+
+    个人版/宿舍版任务同名（一机一形态），install 前用它防止静默覆盖。
+    """
+    action = existing_action(name)
+    if not action:
+        return None
+    marker = sys.executable if getattr(sys, "frozen", False) else os.path.abspath(entry_script)
+    if marker.lower() in action.lower():
+        return None
+    return action
