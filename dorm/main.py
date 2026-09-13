@@ -80,6 +80,12 @@ def _seed_admin() -> None:
     print("\n设置完成。\n")
 
 
+def _port_in_use(port: int) -> bool:
+    import socket
+    with socket.socket() as s:
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
 def cmd_web() -> int:
     import uvicorn
 
@@ -96,6 +102,13 @@ def cmd_web() -> int:
     from app.core import wintasks
     if not all(wintasks.exists(name) for name, _ in TASKS.values()):
         print("提示：自动签到未开启，终端执行 lazy-clerk-dorm.exe install 开启。\n")
+
+    # 已有实例在跑（上一个窗口没关）：直接打开页面，本进程退出
+    if _port_in_use(8787):
+        import webbrowser
+        print("管理页已在运行，已为你打开页面。本窗口可直接关闭。")
+        webbrowser.open("http://127.0.0.1:8787/admin")
+        return 0
 
     from dorm.web import app, open_browser_later
 
