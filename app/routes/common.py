@@ -11,7 +11,12 @@ from fastapi.templating import Jinja2Templates
 
 from .. import models
 
-templates = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
+# 模板搜索路径：server/templates（公网版页面）→ app/templates（共享 base/admin_login）。
+# 宿舍版用自己的模板环境（dorm/web.py），不走这里。
+_ROOT = Path(__file__).parent.parent.parent
+_template_dirs = [str(d) for d in (_ROOT / "server" / "templates", _ROOT / "app" / "templates")
+                  if d.is_dir()]
+templates = Jinja2Templates(directory=_template_dirs)
 
 
 def render(request: Request, name: str, **ctx):

@@ -1,6 +1,8 @@
 services:
   lazy-clerk:
-    build: .
+    build:
+      context: ..              # 需要共享层 app/，构建上下文是仓库根
+      dockerfile: server/Dockerfile
     ports:
       - "127.0.0.1:8787:8000"   # 仅监听本机，前置反代任选
     volumes:

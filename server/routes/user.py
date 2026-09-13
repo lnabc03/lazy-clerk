@@ -6,11 +6,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Form, Request
 
-from .. import models
-from ..core import signer
-from .common import (clear_login_failures, current_user, login_locked,
-                     mask_sendkey, next_run_text, record_login_failure,
-                     redirect, render)
+from app import models
+from app.core import signer
+from app.routes.common import (clear_login_failures, current_user, login_locked,
+                               mask_sendkey, next_run_text, record_login_failure,
+                               redirect, render)
 
 router = APIRouter()
 
@@ -55,7 +55,7 @@ async def change_password(request: Request, account: str = Form(...),
     该密码同时是本站登录凭据与医院签到凭据。先对 SSO 认证新密码，
     通过才更新入库——与注册同一套验证逻辑。
     """
-    from ..core.client import verify_account
+    from app.core.client import verify_account
 
     account = account.strip()
     if len(password) < 4 or password != password2:

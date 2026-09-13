@@ -15,19 +15,24 @@ def _default_data_dir() -> str:
 
 
 def _load_dotenv() -> None:
-    """极简 .env 加载（不引入 python-dotenv 依赖），已存在的环境变量优先。"""
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
-    if not os.path.exists(path):
+    """极简 .env 加载（不引入 python-dotenv 依赖），已存在的环境变量优先。
+
+    候选位置：server/.env（公网版部署约定）→ 项目根 .env（本地开发）。
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for path in (os.path.join(root, "server", ".env"), os.path.join(root, ".env")):
+        if not os.path.exists(path):
+            continue
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key, value = key.strip(), value.strip()
+                if key and key not in os.environ:
+                    os.environ[key] = value
         return
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key, value = key.strip(), value.strip()
-            if key and key not in os.environ:
-                os.environ[key] = value
 
 
 _load_dotenv()

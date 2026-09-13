@@ -1,56 +1,47 @@
 # lazy-clerk
 
-实习医生考勤自动签到系统。每天自动登录医院统一登录平台，进入实习考勤系统完成当前时段签到。
+实习医生考勤自动签到系统。在医院统一登录平台（SSO）与实习考勤系统之间自动完成
+每天上/下午两个时段的签到，签到结果推送到微信（Server 酱）。
 
-> **三个平行分支（2026-09-13）**：
-> - **个人版** [`personal/`](personal/README.md)：单 exe 跑在每人自己电脑上，主线，推荐使用
-> - **宿舍版** [`dorm/`](dorm/README.md)：一台常开的 Windows 电脑服务全宿舍 4–6 人，计划任务签到 + 管理员浏览器管理页
-> - **公网版**（本文下方，Docker 多账号）：曾因"单 IP 代理多账号"被医院 SSO 封禁（详见
->   [docs/lazy-clerk-SSO故障报告与解决方案.md](docs/lazy-clerk-SSO故障报告与解决方案.md)），
->   解封后有限维护，已加拟人化随机调度
+## 三种形态
 
-## 公网版（有限维护）
+同一套签到核心（`app/core/`），三种部署形态，按场景任选其一：
 
-- FastAPI 单体应用，单容器部署
-- 多账号（< 20 人），邀请码自助注册
-- 用户登录后可查看近 7 天签到记录、手动签到、配置个人 Server 酱 SendKey
-- 管理页查看各账号签到状态与历史
-- 签到失败通过 Server 酱推送告警
+| | 个人版 | 宿舍版 | 公网版 |
+| --- | --- | --- | --- |
+| 一句话定位 | 每人电脑上一个 exe | 一台常开电脑服务全宿舍 | 服务器上多账号服务 |
+| 适用规模 | 1 人 | 4–6 人 | < 20 人 |
+| 运行环境 | Windows，双击即用 | Windows，长期开机 | Linux + Docker |
+| 调度方式 | Windows 计划任务 | Windows 计划任务 | APScheduler（容器内） |
+| 触发时间 | 6:58 / 13:58 准点 | 6:53–6:58 / 13:53–13:58 随机 | 6:53–6:58 / 13:53–13:58 随机 |
+| 管理界面 | 命令行交互菜单 | 浏览器管理页（仅管理员，随用随开） | 浏览器（用户页 + 管理页） |
+| 账号管理 | 本人配置向导 | 管理员代录（先过医院 SSO 验证） | 邀请码自助注册 |
+| 数据存储 | config.json + sign.log | SQLite | SQLite |
+| 风控暴露面 | 家庭正常 IP，最低 | 校园网 IP，低 | 机房 IP 代理多账号，**曾被封禁** |
+| 文档 | [personal/README.md](personal/README.md) | [dorm/README.md](dorm/README.md) | [server/README.md](server/README.md) |
 
-## 快速开始
+选择建议：一个人用选**个人版**；宿舍合用一台常开电脑选**宿舍版**；有可信网络环境的
+服务器再考虑**公网版**（2026-09 曾因"单 IP 代理多账号"被医院 SSO 封禁，解封后有限维护）。
 
-```bash
-cp .env.example .env   # 填写 ADMIN_PASSWORD / SERVERCHAN_SENDKEY / SESSION_SECRET
-docker compose up -d --build
+## 仓库结构
+
+```
+app/        三版共享层：core（登录链路/签到编排/推送/计划任务助手）、models、db、config
+server/     公网版：FastAPI 路由与页面、APScheduler、Dockerfile、部署与冒烟脚本
+dorm/       宿舍版：exe 入口（web/sign/install/uninstall）+ 管理员页面模板
+personal/   个人版：exe 入口（交互菜单 + setup/sign/status/install/uninstall）
+tests/      核心逻辑单测（pytest）
 ```
 
-> 服务器部署的完整流程（含数据持久化、验证清单、故障排查）见 [docs/deploy-server.md](docs/deploy-server.md)。
-> 注意：`ADMIN_PASSWORD` 只在数据库首次初始化时播种，此后在管理页"管理员设置"中修改。
-
-生成邀请码（明文只打印一次，请线下分发给同事）：
-
-```bash
-docker compose exec lazy-clerk python scripts/gen_invites.py --count 50
-```
-
-访问：用户页 `http://127.0.0.1:8787/`，管理页 `http://127.0.0.1:8787/admin`。
-
-## 冒烟测试
-
-部署前用真实账号验证核心链路：
-
-```bash
-python scripts/smoke.py --account <工号> --password <密码>   # S0–S3，窗口外可跑
-python scripts/smoke.py --stage S5 --sendkey <SendKey>       # 通知链路
-python scripts/smoke.py --stage S6 --url <服务地址> --invite <邀请码>  # 注册闭环
-```
-
-S1–S3 可随时重跑，是医院系统改版后的日常回归手段。
+医院系统改版时只需改 `app/core/client.py`，三版同时生效。设计与决策的完整记录见
+[lazy-clerk 设计稿.md](lazy-clerk%20设计稿.md)（含三分支一致性约定 15.4）。
 
 ## 风险声明（必读）
 
-- **用户密码明文存储**：签到链路必须持有可登录的原始密码，无法哈希存储。数据库文件已限制权限（容器内非 root 运行、数据卷挂载），请自行加固服务器。使用者注册前应知悉这一点。
-- 目标系统为 HTTP 明文协议，凭证与签到请求在链路上不加密——这是医院系统的现状，本工具无法改变。
+- **密码明文存储**：签到链路必须持有可登录的原始密码，无法哈希存储。个人版存本机
+  config.json，宿舍/公网版存 SQLite。请妥善保管数据文件，不要发给别人。
+- 目标系统为 HTTP 明文协议，凭证与签到请求在链路上不加密——这是医院系统的现状，
+  本工具无法改变。
 - 本工具仅自动化"本人按时到岗后的例行点击"，**不支持也不应用于虚构出勤**。
 - 使用者需自行确认所在单位对自动化签到的管理规定。
 

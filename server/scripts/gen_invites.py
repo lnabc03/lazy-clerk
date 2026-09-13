@@ -21,7 +21,7 @@ def main() -> None:
 
     db.init()
     codes = [models.generate_invite() for _ in range(args.count)]
-    print(f"已生成 {args.count} 个邀请码。明文如下，也可在管理页"未使用邀请码"中随时查看：\n")
+    print(f"已生成 {args.count} 个邀请码。明文如下，也可在管理页「未使用邀请码」中随时查看：\n")
     for c in codes:
         print(c)
 

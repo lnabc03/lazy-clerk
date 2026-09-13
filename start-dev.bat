@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 >nul
-rem lazy-clerk 本地开发版启动脚本
+rem lazy-clerk 公网版本地开发启动脚本
 cd /d %~dp0
 
 echo ==========================================
-echo   lazy-clerk 本地开发版
+echo   lazy-clerk 公网版（本地开发）
 echo ==========================================
 
 python --version >nul 2>&1
@@ -17,7 +17,7 @@ if errorlevel 1 (
 python -c "import fastapi, uvicorn, httpx, apscheduler, Crypto, jinja2" >nul 2>&1
 if errorlevel 1 (
     echo [提示] 依赖缺失，正在安装...
-    pip install -r requirements.txt
+    pip install -r server\requirements.txt
     if errorlevel 1 (
         echo [错误] 依赖安装失败
         pause
@@ -26,8 +26,8 @@ if errorlevel 1 (
 )
 
 if not exist .env (
-    echo [提示] 未找到 .env，已从 .env.example 复制一份，请按需修改后重启
-    copy .env.example .env >nul
+    echo [提示] 未找到 .env，已从 server\.env.example 复制一份，请按需修改后重启
+    copy server\.env.example .env >nul
 )
 
 if not exist data (
@@ -43,5 +43,5 @@ echo   已开启代码热重载，修改代码自动重启；Ctrl+C 停止
 echo ==========================================
 echo.
 
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8787 --reload
+python -m uvicorn server.main:app --host 127.0.0.1 --port 8787 --reload
 pause

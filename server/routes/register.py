@@ -7,9 +7,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Form, Request
 
-from .. import models
-from ..core.client import verify_account
-from .common import redirect, render
+from app import models
+from app.core.client import verify_account
+from app.routes.common import redirect, render
 
 router = APIRouter()
 

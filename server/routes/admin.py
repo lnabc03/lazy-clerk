@@ -3,12 +3,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Form, Request
 
-from .. import models
-from ..config import settings
-from ..core import signer
-from .common import (clear_login_failures, is_admin, login_locked,
-                     make_badge, mask_account, mask_sendkey,
-                     record_login_failure, redirect, render)
+from app import models
+from app.config import settings
+from app.core import signer
+from app.routes.common import (clear_login_failures, is_admin, login_locked,
+                               make_badge, mask_account, mask_sendkey,
+                               record_login_failure, redirect, render)
 
 router = APIRouter(prefix="/admin")
 

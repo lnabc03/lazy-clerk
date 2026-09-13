@@ -1,6 +1,7 @@
 """APScheduler 调度：两个 cron 签到任务 + 每日日志清理（设计稿第 7 章）。
 
 进程重启后任务自动恢复——错过即错过，重试窗口内自然覆盖，无需任务持久化。
+仅公网版使用；个人版/宿舍版的调度外包给 Windows 计划任务（app/core/wintasks.py）。
 """
 from __future__ import annotations
 
@@ -9,9 +10,9 @@ import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from .. import models
-from ..config import settings
-from . import signer
+from app import models
+from app.config import settings
+from app.core import signer
 
 log = logging.getLogger("lazy-clerk.scheduler")
 

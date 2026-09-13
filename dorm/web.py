@@ -13,7 +13,6 @@ import webbrowser
 
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from jinja2 import ChoiceLoader, Environment, FileSystemLoader, select_autoescape
 from starlette.middleware.sessions import SessionMiddleware
@@ -57,8 +56,6 @@ app.add_middleware(
     max_age=7 * 24 * 3600,
     same_site="lax",
 )
-app.mount("/static", StaticFiles(directory=os.path.join(bundle_dir(), "app", "static")),
-          name="static")
 
 
 def open_browser_later(url: str = "http://127.0.0.1:8787/admin") -> None:

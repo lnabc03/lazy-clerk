@@ -521,3 +521,10 @@ TZ=Asia/Shanghai
   个人版菜单走 `sign_user_with_retry`（交互等得起）
 - 日志清理：公网 APScheduler 每日清理；宿舍签到任务顺带清理；个人版 sign.log 超 512KB 截断
 - 管理页徽标渲染共用 `app/routes/common.py` 的 `make_badge`，勿在分支里另抄
+
+### 15.5 目录重构（v0.5，2026-09-13）
+
+公网版专属代码移入 `server/`（main/scheduler/routes/templates/scripts/Dockerfile/
+compose/requirements/.env.example + 部署包），`app/` 收敛为三版共享层（core/models/
+db/config + routes/common.py + 共享模板 base/admin_login）。第 11 章项目结构已过时，
+以根 README 仓库结构为准。静态资源目录 app/static 无引用已删除。
