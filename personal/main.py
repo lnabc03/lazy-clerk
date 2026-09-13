@@ -7,14 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import os
-import subprocess
 import sys
 
 # 源码直接运行（python personal/main.py）时补项目根目录到 sys.path
 if not getattr(sys, "frozen", False):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.core import signer  # noqa: E402
+from app.core import signer, wintasks  # noqa: E402
 from app.models import User  # noqa: E402
 from personal.config import LOG_PATH, load, wizard  # noqa: E402
 
@@ -87,37 +86,14 @@ async def cmd_status() -> int:
     return 0
 
 
-def _task_cmd(action: str) -> str:
-    """计划任务调用的命令行：打包后直接 exe，源码时走 python 解释器。"""
-    if getattr(sys, "frozen", False):
-        return f'"{sys.executable}" {action}'
-    return f'"{sys.executable}" "{os.path.abspath(__file__)}" {action}'
-
-
-def _enable_wakeup(name: str) -> bool:
-    """给计划任务开启睡眠唤醒与错过补跑（schtasks 命令行不支持，走 PowerShell）。
-
-    锁屏不影响任务运行（schtasks 默认方式创建即可），这里只补唤醒相关设置。
-    """
-    ps = (f"$t = Get-ScheduledTask -TaskName '{name}'; "
-          f"$t.Settings.WakeToRun = $true; "
-          f"$t.Settings.StartWhenAvailable = $true; "
-          f"Set-ScheduledTask -InputObject $t | Out-Null")
-    r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                       capture_output=True, text=True)
-    return r.returncode == 0
-
-
 def cmd_install() -> int:
     for period, name in TASK_NAMES.items():
-        r = subprocess.run(
-            ["schtasks", "/create", "/tn", name, "/tr", _task_cmd("sign"),
-             "/sc", "daily", "/st", TASK_TIMES[period], "/f"],
-            capture_output=True, text=True)
-        if r.returncode != 0:
-            print(f"注册计划任务失败：{(r.stderr or r.stdout).strip()}")
+        err = wintasks.create_daily(name, TASK_TIMES[period], "sign",
+                                    os.path.abspath(__file__))
+        if err:
+            print(f"注册计划任务失败：{err}")
             return 1
-        if not _enable_wakeup(name):
+        if not wintasks.enable_wakeup(name):
             print("睡眠唤醒开启失败（不影响锁屏签到），电脑睡眠时可能错过签到。")
     print("自动签到已开启，每天 6:58 和 13:58 准时执行。")
     print("锁屏不影响签到；电脑插电时睡眠会自动唤醒执行。")
@@ -127,21 +103,14 @@ def cmd_install() -> int:
 
 def cmd_uninstall() -> int:
     for name in TASK_NAMES.values():
-        subprocess.run(["schtasks", "/delete", "/tn", name, "/f"],
-                       capture_output=True, text=True)
+        wintasks.delete(name)
     print("自动签到已关闭。")
     return 0
 
 
 def tasks_installed() -> int:
     """返回已注册的计划任务数量（0–2）。"""
-    count = 0
-    for name in TASK_NAMES.values():
-        r = subprocess.run(["schtasks", "/query", "/tn", name],
-                           capture_output=True, text=True)
-        if r.returncode == 0:
-            count += 1
-    return count
+    return sum(1 for name in TASK_NAMES.values() if wintasks.exists(name))
 
 
 # ---------- 交互模式 ----------

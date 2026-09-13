@@ -47,6 +47,9 @@ def init() -> None:
     os.makedirs(settings.data_dir, exist_ok=True)
     _conn = sqlite3.connect(settings.db_path, check_same_thread=False)
     _conn.row_factory = sqlite3.Row
+    # 宿舍版签到进程与管理 Web 双进程共享库：WAL + 忙等，避免 database is locked
+    _conn.execute("PRAGMA journal_mode=WAL")
+    _conn.execute("PRAGMA busy_timeout=5000")
     _conn.executescript(SCHEMA)
     _migrate()
     _conn.commit()

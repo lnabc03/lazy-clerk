@@ -202,6 +202,15 @@ def today_results() -> dict[int, dict[str, sqlite3.Row]]:
     return out
 
 
+def recent_logs(limit: int = 50) -> list[sqlite3.Row]:
+    """全账号最近日志（管理页用），按操作时间倒序。"""
+    return conn().execute(
+        "SELECT l.*, u.nickname FROM sign_logs l JOIN users u ON u.id = l.user_id"
+        " ORDER BY l.created_at DESC, l.id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+
+
 def cleanup_logs(days: int = 90) -> int:
     cutoff = (datetime.now(TZ) - timedelta(days=days)).strftime("%Y-%m-%d")
     cur = conn().execute("DELETE FROM sign_logs WHERE date<?", (cutoff,))

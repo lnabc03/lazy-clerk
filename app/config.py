@@ -3,7 +3,15 @@ from __future__ import annotations
 
 import os
 import secrets
+import sys
 from dataclasses import dataclass, field
+
+
+def _default_data_dir() -> str:
+    """打包成 exe 时数据目录固定在 exe 旁边（计划任务的 CWD 不可靠）。"""
+    if getattr(sys, "frozen", False):
+        return os.path.join(os.path.dirname(sys.executable), "data")
+    return "data"
 
 
 def _load_dotenv() -> None:
@@ -34,7 +42,7 @@ class Settings:
         default_factory=lambda: os.environ.get("SESSION_SECRET") or secrets.token_hex(32)
     )
     tz: str = field(default_factory=lambda: os.environ.get("TZ", "Asia/Shanghai"))
-    data_dir: str = field(default_factory=lambda: os.environ.get("DATA_DIR", "data"))
+    data_dir: str = field(default_factory=lambda: os.environ.get("DATA_DIR") or _default_data_dir())
 
     @property
     def db_path(self) -> str:
