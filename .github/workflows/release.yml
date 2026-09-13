@@ -1,0 +1,53 @@
+# 打 tag（v*）即发布：构建个人版/宿舍版 exe 与公网版部署包，附件上传到 GitHub Release
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: pip install -r server/requirements.txt pyinstaller
+
+      - name: Build personal exe
+        run: pyinstaller --onefile --console --name lazy-clerk --collect-data tzdata personal/main.py
+
+      - name: Build dorm exe
+        run: >
+          pyinstaller --onefile --console --name lazy-clerk-dorm --collect-data tzdata
+          --add-data "app/templates;app/templates" --add-data "dorm/templates;dorm/templates"
+          dorm/main.py
+
+      - name: Package three editions
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}"
+          New-Item -ItemType Directory -Force staging/personal, staging/dorm | Out-Null
+          Copy-Item dist/lazy-clerk.exe       staging/personal/lazy-clerk.exe
+          Copy-Item personal/README.md        staging/personal/README.md
+          Copy-Item dist/lazy-clerk-dorm.exe  staging/dorm/lazy-clerk-dorm.exe
+          Copy-Item dorm/README.md            staging/dorm/README.md
+          Compress-Archive staging/personal/* "lazy-clerk-personal-$v-windows.zip"
+          Compress-Archive staging/dorm/*     "lazy-clerk-dorm-$v-windows.zip"
+          tar --exclude='server/*.tar.gz' -czf "lazy-clerk-server-$v.tar.gz" app server
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            lazy-clerk-personal-${{ github.ref_name }}-windows.zip
+            lazy-clerk-dorm-${{ github.ref_name }}-windows.zip
+            lazy-clerk-server-${{ github.ref_name }}.tar.gz
+          generate_release_notes: true
