@@ -1,7 +1,10 @@
-# 打 tag（v*）即发布：构建个人版/宿舍版 exe 与公网版部署包，附件上传到 GitHub Release
+# 发布 Release（或打 v* tag）即触发：构建个人版/宿舍版 exe 与公网版部署包，
+# 附件上传到对应 GitHub Release
 name: release
 
 on:
+  release:
+    types: [published]
   push:
     tags: ["v*"]
 
