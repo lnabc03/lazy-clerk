@@ -6,7 +6,9 @@ ENV TZ=Asia/Shanghai \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# 服务器直连 PyPI 会卡死（实测 8s 超时），必须走清华镜像源
+RUN pip install --no-cache-dir -r requirements.txt \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 COPY app ./app
 COPY scripts ./scripts
