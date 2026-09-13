@@ -142,7 +142,8 @@ docker compose exec lazy-clerk python scripts/gen_invites.py --count 10
 | --- | --- |
 | 看日志 | `docker compose logs -f --tail 100` |
 | 重启 | `docker compose restart` |
-| 升级（代码更新后） | `git pull && docker compose up -d --build` |
+| 升级（git 方式） | `git pull && docker compose up -d --build` |
+| 升级（压缩包方式） | 在部署目录解压新包覆盖代码：`tar xzf lazy-clerk-server-*.tar.gz`（包内不含 `.env` 与 `data/`，覆盖安全），然后 `docker compose up -d --build` |
 | 回滚 | `git checkout <旧版本> && docker compose up -d --build` |
 | 进容器排查 | `docker compose exec lazy-clerk bash` |
 | 补生成邀请码 | `docker compose exec lazy-clerk python scripts/gen_invites.py --count 5` |
