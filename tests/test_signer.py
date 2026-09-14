@@ -32,6 +32,20 @@ def test_decide_manual():
     assert signer.decide(_row(status=None, day_off=1)).result == signer.RESULT_MANUAL  # 补签
 
 
+def test_classify_rejection_leave_is_terminal():
+    """请假/休假类拒绝 → no_schedule 终态：不重试不告警（实测文案「当天已请假，不可签到」）。"""
+    o = signer.classify_rejection("当天已请假，不可签到")
+    assert o.result == signer.RESULT_NO_SCHEDULE
+    assert not o.retryable
+
+
+def test_classify_rejection_unknown_is_retryable():
+    """未识别的拒绝 → 可重试失败（可能是临时故障）。"""
+    o = signer.classify_rejection("系统繁忙，请稍后再试")
+    assert o.result == signer.RESULT_FAILED
+    assert o.retryable
+
+
 def _user(uid, account):
     return models.User(id=uid, nickname=account, account=account, password="p",
                        sendkey=None, enabled=True, created_at="")

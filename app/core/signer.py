@@ -77,6 +77,22 @@ def decide(row: dict) -> SignOutcome:
     return SignOutcome(RESULT_MANUAL, f"状态异常（SignInStatus={status}），请人工处理")
 
 
+# 服务端拒绝中"本就不需要签到"的明确场景——终态，不重试、不告警。
+# 按实测文案扩充，勿凭猜测添加。已观测：「当天已请假，不可签到」
+NO_SIGN_NEEDED_INFO = ("请假", "休假")
+
+
+def classify_rejection(info: str) -> SignOutcome:
+    """SignStuCate 拒绝（Success != '1'）的分类。
+
+    明确无需签到的（请假/休假）→ no_schedule 终态：静默记日志，不重试不推送；
+    其余视为可重试失败（可能是医院系统临时故障），进入重试循环。
+    """
+    if any(k in info for k in NO_SIGN_NEEDED_INFO):
+        return SignOutcome(RESULT_NO_SCHEDULE, f"服务端提示：{info}")
+    return SignOutcome(RESULT_FAILED, f"服务端拒绝: {info}", retryable=True)
+
+
 async def sign_user_once(user: models.User, period: str) -> SignOutcome:
     """单账号单时段完整流程（登录 → 拉列表 → 判定 → 签到）。只跑一遍，不重试。"""
     today = datetime.now(TZ).strftime("%Y-%m-%d")
@@ -93,8 +109,7 @@ async def sign_user_once(user: models.User, period: str) -> SignOutcome:
             resp = await client.sign(int(row["ID"]), status=1)
             if str(resp.get("Success")) == "1":
                 return SignOutcome(RESULT_SUCCESS, "签到成功")
-            return SignOutcome(RESULT_FAILED, f"服务端拒绝: {resp.get('Info', resp)}",
-                               retryable=True)
+            return classify_rejection(str(resp.get("Info") or resp))
     except AuthError as e:
         # 密码错误/账号锁定：重试无意义，首次即推
         return SignOutcome(RESULT_FAILED, f"登录失败: {e}", retryable=False)
