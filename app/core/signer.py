@@ -209,21 +209,33 @@ async def sign_user_manual(user: models.User, log_prefix: str = "[手动]") -> S
     return outcome
 
 
+async def _sign_one(user: models.User, period: str) -> None:
+    """单个账号的签到任务：崩溃只记日志，不影响其他账号。"""
+    try:
+        outcome = await sign_user_with_retry(user, period)
+        log.info("user=%s %s → %s %s", user.account, period, outcome.result, outcome.message)
+    except Exception:
+        log.exception("账号签到流程崩溃（已隔离）user=%s", user.account)
+
+
 async def sign_all(period: str) -> None:
-    """定时任务入口：遍历所有启用账号，顺序执行，失败隔离。"""
+    """定时任务入口：每个账号一个独立任务，错峰启动、互不阻塞。
+
+    不能顺序 await——某账号进入 5 分钟重试循环会阻塞后面所有账号
+    （实测：一人请假被拒，后续账号全部错过签到窗口）。
+    """
     log.info("开始 %s 时段签到", period)
     users = [u for u in models.list_users() if u.enabled]
+    tasks = []
     for i, user in enumerate(users):
         if i:
             # 拟人化：账号间随机间隔 10–40 秒，避免多账号同一秒齐发命中风控
             delay = random.uniform(10, 40)
             log.info("账号间随机间隔 %.0f 秒", delay)
             await asyncio.sleep(delay)
-        try:
-            outcome = await sign_user_with_retry(user, period)
-            log.info("user=%s %s → %s %s", user.account, period, outcome.result, outcome.message)
-        except Exception:
-            log.exception("账号签到流程崩溃（已隔离）user=%s", user.account)
+        tasks.append(asyncio.create_task(_sign_one(user, period)))
+    for t in tasks:
+        await t
     log.info("%s 时段签到结束", period)
 
 

@@ -1,4 +1,7 @@
 """签到判定逻辑单测：find_target_row / decide（设计稿 4.1）。"""
+import asyncio
+
+from app import models
 from app.core import signer
 
 
@@ -27,3 +30,46 @@ def test_decide_already_signed():
 def test_decide_manual():
     assert signer.decide(_row(status=-3)).result == signer.RESULT_MANUAL   # 迟到
     assert signer.decide(_row(status=None, day_off=1)).result == signer.RESULT_MANUAL  # 补签
+
+
+def _user(uid, account):
+    return models.User(id=uid, nickname=account, account=account, password="p",
+                       sendkey=None, enabled=True, created_at="")
+
+
+def test_sign_all_slow_account_does_not_block_others(monkeypatch):
+    """回归（v0.1.0 缺陷）：前序账号进入重试循环不得阻塞后续账号。"""
+    monkeypatch.setattr(models, "list_users", lambda: [_user(1, "a"), _user(2, "b")])
+    monkeypatch.setattr(signer.random, "uniform", lambda lo, hi: 0)
+
+    b_done = asyncio.Event()
+
+    async def fake_with_retry(user, period, log_fn=None):
+        if user.account == "a":
+            await b_done.wait()  # a 卡在重试中，直到 b 完成才返回
+        else:
+            b_done.set()
+        return signer.SignOutcome(signer.RESULT_SUCCESS, "ok")
+
+    monkeypatch.setattr(signer, "sign_user_with_retry", fake_with_retry)
+
+    # 顺序执行的话这里必然死锁，5 秒超时即失败；并行则立即通过
+    asyncio.run(asyncio.wait_for(signer.sign_all("am"), timeout=5))
+    assert b_done.is_set()
+
+
+def test_sign_all_crash_isolated(monkeypatch):
+    """单账号流程崩溃不影响其他账号执行。"""
+    monkeypatch.setattr(models, "list_users", lambda: [_user(1, "a"), _user(2, "b")])
+    monkeypatch.setattr(signer.random, "uniform", lambda lo, hi: 0)
+    ran = []
+
+    async def fake_with_retry(user, period, log_fn=None):
+        ran.append(user.account)
+        if user.account == "a":
+            raise RuntimeError("boom")
+        return signer.SignOutcome(signer.RESULT_SUCCESS, "ok")
+
+    monkeypatch.setattr(signer, "sign_user_with_retry", fake_with_retry)
+    asyncio.run(signer.sign_all("am"))
+    assert ran == ["a", "b"]
