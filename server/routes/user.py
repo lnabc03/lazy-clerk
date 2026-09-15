@@ -1,4 +1,4 @@
-"""用户侧路由：/login /logout /me /me/sendkey /me/sign-now。
+"""用户侧路由：/login /logout /me /me/sendkey /me/sign-now /me/toggle /me/delete。
 
 登录凭据即医院工号 + 医院密码（与 users 表明文比对，设计稿 6.3）。
 """
@@ -38,8 +38,8 @@ async def login_submit(request: Request, account: str = Form(...), password: str
     if not user or user.password != password:
         record_login_failure(ip)
         return redirect("/login", error="账号或密码错误")
-    if not user.enabled:
-        return redirect("/login", error="账号已停用，请联系管理员")
+    # 停用账号允许登录（仅暂停自动签到），用户可随时自助改回；
+    # 要彻底移出系统请用删除（管理页或 /me 注销）。
 
     clear_login_failures(ip)
     request.session.clear()
@@ -105,3 +105,27 @@ async def sign_now(request: Request):
     if outcome.result in (signer.RESULT_SUCCESS, signer.RESULT_SKIPPED, signer.RESULT_NO_SCHEDULE):
         return redirect("/me", msg=outcome.message)
     return redirect("/me", error=outcome.message)
+
+
+@router.post("/me/toggle")
+async def toggle_self(request: Request):
+    """自助停用/启用自动签到（与管理页账号开关同一语义）。
+
+    停用仅暂停自动签到，不影响登录，用户可随时改回。
+    """
+    user = current_user(request)
+    if not user:
+        return redirect("/login")
+    models.set_user_enabled(user.id, not user.enabled)
+    return redirect("/me", msg=f"自动签到已{'启用' if not user.enabled else '停用'}")
+
+
+@router.post("/me/delete")
+async def delete_self(request: Request):
+    """注销：删除本账号及全部签到日志（与管理页删除同一语义），随后退出登录。"""
+    user = current_user(request)
+    if not user:
+        return redirect("/login")
+    models.delete_user(user.id)
+    request.session.clear()
+    return redirect("/login", msg="账号已注销，感谢使用")

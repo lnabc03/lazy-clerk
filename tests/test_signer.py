@@ -37,6 +37,40 @@ def test_classify_rejection_leave_is_terminal():
     o = signer.classify_rejection("当天已请假，不可签到")
     assert o.result == signer.RESULT_NO_SCHEDULE
     assert not o.retryable
+    assert o.notify  # 请假需推送告知用户本人
+
+
+def test_leave_rejection_pushes_user(monkeypatch):
+    """请假类拒绝在重试编排中触发用户推送。"""
+    pushed = []
+
+    async def fake_push(user, period, message):
+        pushed.append(message)
+
+    async def fake_once(user, period):
+        return signer.classify_rejection("当天已请假，不可签到")
+
+    monkeypatch.setattr(signer, "push_no_sign_needed", fake_push)
+    monkeypatch.setattr(signer, "sign_user_once", fake_once)
+    outcome = asyncio.run(signer.sign_user_with_retry(
+        _user(1, "a"), "am", log_fn=lambda *a: None))
+    assert outcome.result == signer.RESULT_NO_SCHEDULE
+    assert pushed and "请假" in pushed[0]
+
+
+def test_plain_no_schedule_stays_silent(monkeypatch):
+    """无排班的 no_schedule 是日常状态，不推送。"""
+    async def fake_push(user, period, message):
+        raise AssertionError("无排班不应推送")
+
+    async def fake_once(user, period):
+        return signer.SignOutcome(signer.RESULT_NO_SCHEDULE, "今日无该时段排班，无需签到")
+
+    monkeypatch.setattr(signer, "push_no_sign_needed", fake_push)
+    monkeypatch.setattr(signer, "sign_user_once", fake_once)
+    outcome = asyncio.run(signer.sign_user_with_retry(
+        _user(1, "a"), "am", log_fn=lambda *a: None))
+    assert outcome.result == signer.RESULT_NO_SCHEDULE
 
 
 def test_classify_rejection_unknown_is_retryable():

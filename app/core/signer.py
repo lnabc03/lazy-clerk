@@ -54,6 +54,7 @@ class SignOutcome:
     result: str
     message: str
     retryable: bool = False  # True 时进入重试循环
+    notify: bool = False     # 静默终态（skipped/no_schedule）中需告知用户的场景
 
 
 def find_target_row(rows: list[dict], date: str, period: str) -> dict | None:
@@ -85,11 +86,12 @@ NO_SIGN_NEEDED_INFO = ("请假", "休假")
 def classify_rejection(info: str) -> SignOutcome:
     """SignStuCate 拒绝（Success != '1'）的分类。
 
-    明确无需签到的（请假/休假）→ no_schedule 终态：静默记日志，不重试不推送；
-    其余视为可重试失败（可能是医院系统临时故障），进入重试循环。
+    明确无需签到的（请假/休假）→ no_schedule 终态：不重试，推送告知用户本人
+    （无排班的 no_schedule 是日常状态不推送，请假是偶发事件且需用户知情——
+    若非本人请假即为异常信号）。
     """
     if any(k in info for k in NO_SIGN_NEEDED_INFO):
-        return SignOutcome(RESULT_NO_SCHEDULE, f"服务端提示：{info}")
+        return SignOutcome(RESULT_NO_SCHEDULE, f"服务端提示：{info}", notify=True)
     return SignOutcome(RESULT_FAILED, f"服务端拒绝: {info}", retryable=True)
 
 
@@ -129,6 +131,14 @@ async def push_success(user: models.User, period: str) -> None:
     if user.sendkey:
         await notify(f"✅签到成功｜{user.nickname}｜{_period_label(period)}",
                      "自动签到成功。", sendkey=user.sendkey)
+
+
+async def push_no_sign_needed(user: models.User, period: str, reason: str) -> None:
+    """请假/休假等"无需签到"告知（仅用户本人，与成功推送同策略：无 SendKey 则静默）。"""
+    if user.sendkey:
+        await notify(f"🌴无需签到｜{user.nickname}｜{_period_label(period)}",
+                     f"{reason}\n今日自动签到已跳过。若非本人请假，请留意考勤状态。",
+                     sendkey=user.sendkey)
 
 
 async def push_final_failure(user: models.User, period: str, reason: str) -> None:
@@ -184,6 +194,8 @@ async def sign_user_with_retry(
             log_fn(user.id, today, period, outcome.result, outcome.message)
             if outcome.result == RESULT_SUCCESS:
                 await push_success(user, period)
+            elif outcome.notify:
+                await push_no_sign_needed(user, period, outcome.message)
             return outcome
 
         if outcome.result == RESULT_MANUAL:
