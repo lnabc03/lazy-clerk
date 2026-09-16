@@ -1,5 +1,5 @@
 # mihomo 配置模板：订阅链接与 API 密钥在容器启动时从 .env 注入（见 docker-compose.yml）。
-# 分流策略：仅医院域名走 hospital 组（直连优先，被封自动切最快节点），其余全部直连。
+# 分流策略：仅医院域名走 hospital 组（app 双通道探针决定直连还是代理），其余全部直连。
 mixed-port: 7890
 # 必须 true：app 容器经 docker 网络用 mihomo:7890 访问，mixed-port 需绑定
 # 到容器网卡（0.0.0.0）。7890 未映射到宿主，仅 docker 内网可达，安全无虞。
@@ -12,7 +12,7 @@ proxy-providers:
   sub:
     type: http
     url: "__SUB_URL__"
-    interval: 86400                  # 订阅每天刷新
+    interval: 3600                   # 订阅每小时刷新：节点池变化（上下线/换 IP）及时跟进
     health-check:
       enable: true
       url: http://my.gzsums.net:1118/
@@ -21,21 +21,23 @@ proxy-providers:
 
 proxy-groups:
   # 自动选速：按医院 SSO 实测延迟挑最快节点（不是通用测速，避免选了快但到不了医院的）
+  # exclude-filter 剔除订阅里混入的套餐信息类假节点；tolerance 300 防止
+  # 测速噪声导致节点反复横跳（家宽节点逐次测速摆动可达数倍）
   - name: hospital-auto
     type: url-test
     use: [sub]
+    exclude-filter: "剩余流量|套餐|到期|官网|客服"
     url: http://my.gzsums.net:1118/
     expected-status: "200,302"
     interval: 300
-    tolerance: 100
+    tolerance: 300
 
-  # 直连优先：直连健康检查失败（被封）→ 自动跌到最快节点；直连恢复 → 自动切回
+  # 出口选择器：DIRECT 还是代理，由 app 的双通道探针决定（app 是唯一大脑，
+  # 这里只执行不自主切换——曾用 fallback 自动判，健康检查 5 分钟滞后且
+  # 判定不稳，与 app 探针互相覆盖导致出口反复横跳）
   - name: hospital
-    type: fallback
+    type: select
     proxies: [DIRECT, hospital-auto]
-    url: http://my.gzsums.net:1118/
-    expected-status: "200,302"
-    interval: 300
 
 rules:
   - DOMAIN-SUFFIX,my.gzsums.net,hospital

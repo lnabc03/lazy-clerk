@@ -88,7 +88,7 @@ def test_old_db_migrates_channel_column(tmp_path):
         _restore_db()
 
 
-# ---------- probe() 两阶段逻辑：直连失败 → 立即切代理复核，代理也失败才判不可达 ----------
+# ---------- probe() 双通道逻辑：直连/代理各测一次，按结果调整出口 ----------
 
 import asyncio  # noqa: E402
 
@@ -110,95 +110,105 @@ async def _fake(value):
     return value
 
 
+def _patch_channels(monkeypatch, direct, proxy, retest=(None, ""), current="direct"):
+    """mock 四条外部依赖：直连结果、代理当前节点结果、全量重测结果、当前出口。"""
+    monkeypatch.setattr(client, "_probe_direct", lambda t=8.0: _fake(direct))
+    monkeypatch.setattr(client, "_probe_proxy", lambda t=8.0: _fake(proxy))
+    monkeypatch.setattr(client, "_proxy_group_retest", lambda t=8.0: _fake(retest))
+    monkeypatch.setattr(client, "current_channel", lambda: _fake(current))
+
+
+def _patch_switch(monkeypatch, calls: list):
+    async def _switch(target):
+        calls.append(target)
+        return None
+    monkeypatch.setattr(client, "mihomo_switch", _switch)
+
+
 def test_probe_direct_ok_no_switch(monkeypatch):
-    """直连成功：标 direct，不触发任何切换。"""
+    """直连通且已在直连出口：标 direct，不触发任何切换。"""
     _proxy_on()
     try:
-        monkeypatch.setattr(client, "_probe_once",
-                            lambda t=8.0: _fake(client.ProbeResult(True, "HTTP 200", 10)))
-        monkeypatch.setattr(client, "current_channel", lambda: _fake("direct"))
-        async def _switch(target):  # pragma: no cover - 不应被调用
-            raise AssertionError("直连成功不应切换")
-        monkeypatch.setattr(client, "mihomo_switch", _switch)
+        _patch_channels(monkeypatch, direct=(True, 10, "正常"), proxy=(561, "节点A"))
+        calls = []
+        _patch_switch(monkeypatch, calls)
+        r = asyncio.run(client.probe())
+        assert r.ok and r.channel == "direct" and r.latency_ms == 10
+        assert "561ms" in r.detail  # 代理通道状态也呈现在摘要里
+        assert calls == []
+    finally:
+        _proxy_off()
+
+
+def test_probe_direct_recovers_switches_back(monkeypatch):
+    """直连恢复（当前挂在代理上）：自动切回 DIRECT。"""
+    _proxy_on()
+    try:
+        _patch_channels(monkeypatch, direct=(True, 10, "正常"), proxy=(561, "节点A"),
+                        current="proxy")
+        calls = []
+        _patch_switch(monkeypatch, calls)
         r = asyncio.run(client.probe())
         assert r.ok and r.channel == "direct"
+        assert calls == ["DIRECT"]
     finally:
         _proxy_off()
 
 
 def test_probe_direct_fail_proxy_rescues(monkeypatch):
-    """直连失败 → 主动切代理复核成功：标 proxy（蓝），不再误报红色。"""
+    """直连被封、代理当前节点可用：切代理，标 proxy。"""
     _proxy_on()
     try:
+        _patch_channels(monkeypatch, direct=(False, 8000, "超时（疑似被防火墙拦截）"),
+                        proxy=(561, "节点A"))
         calls = []
-        async def _once(t=8.0):
-            calls.append(1)
-            ok = len(calls) > 1  # 第一次（直连）失败，第二次（代理）成功
-            return client.ProbeResult(ok, "HTTP 200" if ok else "超时", 10)
-        monkeypatch.setattr(client, "_probe_once", _once)
-        monkeypatch.setattr(client, "current_channel", lambda: _fake("direct"))
-        switched = []
-        async def _switch(target):
-            switched.append(target)
-            return None
-        monkeypatch.setattr(client, "mihomo_switch", _switch)
+        _patch_switch(monkeypatch, calls)
         r = asyncio.run(client.probe())
-        assert r.ok and r.channel == "proxy"
-        assert switched == [f"{settings.proxy_group}-auto"]
-        assert len(calls) == 2
+        assert r.ok and r.channel == "proxy" and r.latency_ms == 561
+        assert calls == [f"{settings.proxy_group}-auto"]
+        assert "节点A" in r.detail
     finally:
         _proxy_off()
 
 
-def test_probe_proxy_also_fail_is_red(monkeypatch):
-    """直连失败、切代理复核也失败：判不可达（红）。"""
+def test_probe_node_dead_retest_rescues(monkeypatch):
+    """直连被封且代理当前节点也死：全量重测找到可用节点 → 切代理（即时自愈）。"""
     _proxy_on()
     try:
-        monkeypatch.setattr(client, "_probe_once",
-                            lambda t=8.0: _fake(client.ProbeResult(False, "超时", 8000)))
-        monkeypatch.setattr(client, "current_channel", lambda: _fake("direct"))
-        monkeypatch.setattr(client, "mihomo_switch", lambda target: _fake(None))
+        _patch_channels(monkeypatch, direct=(False, 8000, "超时（疑似被防火墙拦截）"),
+                        proxy=(None, "死节点"), retest=(489, "节点B"))
+        calls = []
+        _patch_switch(monkeypatch, calls)
         r = asyncio.run(client.probe())
-        assert not r.ok and r.channel == "proxy"
+        assert r.ok and r.channel == "proxy" and r.latency_ms == 489
+        assert calls == [f"{settings.proxy_group}-auto"]
+        assert "节点B" in r.detail
     finally:
         _proxy_off()
 
 
-def test_probe_already_on_proxy_fail_is_red(monkeypatch):
-    """当前出口已是代理且失败：不再切换，直接判不可达。"""
+def test_probe_both_fail_is_down_no_switch(monkeypatch):
+    """双通道全灭（全量重测也无可用节点）：判不可达，维持现状不切换。"""
     _proxy_on()
     try:
-        monkeypatch.setattr(client, "_probe_once",
-                            lambda t=8.0: _fake(client.ProbeResult(False, "超时", 8000)))
-        monkeypatch.setattr(client, "current_channel", lambda: _fake("proxy"))
-        async def _switch(target):  # pragma: no cover - 不应被调用
-            raise AssertionError("已在代理出口不应再切换")
-        monkeypatch.setattr(client, "mihomo_switch", _switch)
+        _patch_channels(monkeypatch, direct=(False, 8000, "超时（疑似被防火墙拦截）"),
+                        proxy=(None, "死节点"), retest=(None, ""), current="proxy")
+        calls = []
+        _patch_switch(monkeypatch, calls)
         r = asyncio.run(client.probe())
-        assert not r.ok
+        assert not r.ok and r.channel == "proxy"  # channel 记录当前出口
+        assert calls == []
     finally:
         _proxy_off()
 
 
-def test_probe_no_proxy_direct_fail_is_red(monkeypatch):
-    """未配置代理：直连失败即不可达，不尝试切换。"""
+def test_probe_no_proxy_direct_only(monkeypatch):
+    """未配置代理：只测直连，代理通道函数不应被调用。"""
     _proxy_off()
-    monkeypatch.setattr(client, "_probe_once",
-                        lambda t=8.0: _fake(client.ProbeResult(False, "超时", 8000)))
+    monkeypatch.setattr(client, "_probe_direct",
+                        lambda t=8.0: _fake((False, 8000, "超时（疑似被防火墙拦截）")))
+    async def _boom(t=8.0):  # pragma: no cover - 不应被调用
+        raise AssertionError("未配置代理不应测代理通道")
+    monkeypatch.setattr(client, "_probe_proxy", _boom)
     r = asyncio.run(client.probe())
     assert not r.ok and r.channel == "direct"
-
-
-def test_probe_no_switch_on_first_attempt(monkeypatch):
-    """switch_on_fail=False（定时探测/赛前守卫的首探）：直连失败不切代理，直接报失败。"""
-    _proxy_on()
-    try:
-        monkeypatch.setattr(client, "_probe_once",
-                            lambda t=8.0: _fake(client.ProbeResult(False, "超时", 8000)))
-        async def _switch(target):  # pragma: no cover - 不应被调用
-            raise AssertionError("首探不应切换出口")
-        monkeypatch.setattr(client, "mihomo_switch", _switch)
-        r = asyncio.run(client.probe(switch_on_fail=False))
-        assert not r.ok and r.channel == "direct"
-    finally:
-        _proxy_off()

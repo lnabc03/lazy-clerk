@@ -87,24 +87,25 @@
             {% if proxy_info.now == "DIRECT" %}
             <span class="badge bg-success">直连（服务器 IP）</span>
             {% else %}
-            <span class="badge bg-primary">代理：{{ proxy_info.now }}</span>
+            <span class="badge bg-primary">代理：{{ proxy_info.node }}</span>
             {% endif %}
-            <span class="text-muted ms-1">平时无需干预，直连被封会自动切最快节点，恢复自动切回。</span>
+            <span class="text-muted ms-1">平时无需干预——每小时探测直连/代理双通道，按实测自动调整出口。</span>
         </p>
         <form method="post" action="/admin/proxy/switch" class="d-flex gap-2 flex-wrap align-items-center">
             <select name="target" class="form-select form-select-sm w-auto">
-                <option value="DIRECT">直连优先（默认）</option>
-                <option value="hospital-auto">强制代理 · 自动选速</option>
+                <option value="DIRECT">直连</option>
+                <option value="hospital-auto">代理 · 自动选速</option>
                 {% for n in proxy_info.nodes %}
                 <option value="{{ n.name }}">
-                    {{ n.name }}{{ (' · ' ~ n.delay ~ 'ms') if n.delay else ' · 超时' }}
+                    {{ n.name }}{{ (' · ' ~ n.delay ~ 'ms') if n.delay else ' · 近期测速失败' }}
                 </option>
                 {% endfor %}
             </select>
             <button class="btn btn-outline-primary btn-sm text-nowrap">切换</button>
         </form>
         <p class="small text-muted mt-2 mb-0">
-            手动指定节点在下次测速（约 5 分钟）后可能被自动选速覆盖，适合「当前节点不通先换一个顶着」。
+            节点列表按实测延迟排序（仅列近期可达的）。手动指定节点在下次测速（约 5 分钟）后
+            可能被自动选速覆盖；直连/代理出口则由每小时探测按实测结果重新决定。
         </p>
         {% endif %}
     </div>

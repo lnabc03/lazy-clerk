@@ -20,6 +20,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+# httpx 每请求一条 INFO（含 mihomo API 轮询），噪音远大于价值
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("lazy-clerk")
 
 app = FastAPI(title="lazy-clerk", docs_url=None, redoc_url=None)

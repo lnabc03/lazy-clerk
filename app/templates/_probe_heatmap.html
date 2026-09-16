@@ -9,11 +9,11 @@
             <div class="d-flex align-items-center gap-2">
                 {% if probe_latest %}
                 {% if probe_latest["ok"] and probe_latest["channel"] == "proxy" %}
-                <span class="badge bg-primary">当前正常 · 代理</span>
+                <span class="badge bg-primary" title="{{ probe_latest['detail'] }}">当前正常 · 代理</span>
                 {% elif probe_latest["ok"] %}
-                <span class="badge bg-success">当前正常</span>
+                <span class="badge bg-success" title="{{ probe_latest['detail'] }}">当前正常</span>
                 {% else %}
-                <span class="badge bg-danger">当前不可达</span>
+                <span class="badge bg-danger" title="{{ probe_latest['detail'] }}">当前不可达</span>
                 {% endif %}
                 {% endif %}
                 {% if probe_url %}

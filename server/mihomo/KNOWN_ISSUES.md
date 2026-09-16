@@ -1,70 +1,83 @@
-# 代理逃生通道（mihomo）已知问题与待排查项
+# 代理逃生通道（mihomo）已知问题与架构决策
 
-> 记录公网版代理逃生通道（mihomo sidecar）在上线部署过程中发现的问题。
-> 分「已修复」与「待排查」两部分；「待排查」不影响签到主流程，仅影响监控精度与体验。
+> 记录公网版代理逃生通道（mihomo sidecar）的架构决策与已修复问题。
+> v0.3.0 重构后：**app 双通道探针是出口决策的唯一大脑**，mihomo 只执行。
 
-## 已修复（本次提交）
+## 架构（v0.3.0 起）
 
-### 1. `docker-compose.yml`：sed 注入脚本未执行
+- `hospital` 组为 **selector**（`DIRECT` / `hospital-auto`），不自主切换——
+  出口选择由 app 探针按双通道实测决定（见 `app/core/client.py probe()`）。
+- `hospital-auto` 为 url-test（每 5 分钟按医院首页实测延迟选最快节点），
+  负责**节点级**自动选优；`exclude-filter` 剔除套餐信息类假节点。
+- 探针每测一次 = 直连（本机）+ 代理（mihomo delay API 经当前节点）各一发；
+  直连不通且当前节点也不通时，触发全量重测即时换节点，不等测速周期。
 
-`metacubex/mihomo` 镜像自带 `ENTRYPOINT /mihomo`，而 compose 里用
-`command: sh -c "sed ..."` 注入订阅链接/API 密钥——`command` 只覆盖 CMD、不覆盖
-ENTRYPOINT，导致整段 `sh -c` 被当成参数喂给 `/mihomo`，sed 从未执行，mihomo 以默认
-空配置启动（无订阅、无分流规则）。
+## 关键运维认知（2026-09-16 线上排查定论）
 
-- 修复：加 `entrypoint: ["sh", "-c"]`；命令改为 list 单元素形式（避免 compose 按
-  空白拆成多参数）；`exec mihomo` 改为 `exec /mihomo`（二进制在 `/mihomo`，不在 PATH）。
+### 1. 502 只能来自代理链路，直连失败永远表现为超时
 
-### 2. `config.template.yaml`：`allow-lan: false` 导致 app 连不上代理
+医院对服务器 IP 的封禁是**静默丢包**，直连失败 = 超时，不产生 HTTP 状态码。
+app 所有医院请求统一走 `PROXY_URL`，因此每一个 502 都是代理链路产生的：
 
-`allow-lan: false` 时 mixed-port 只绑定 mihomo 容器内部 `127.0.0.1:7890`，app 容器
-经 docker 网络用 `mihomo:7890` 访问时连接失败（`All connection attempts failed`）。
+- mihomo 日志**有** `dial hospital ... error` 警告 → mihomo 到节点拨号失败
+  （自产 502，如组被手动切到 DIRECT 而直连被封时）；
+- mihomo 日志**无**拨号警告 → 拨号成功，502 是节点上游（机场中转链路/
+  家宽出口）返回后透传的，属节点链路质量问题。
 
-- 修复：`allow-lan: true`。7890 未映射到宿主，仅 docker 内网可达，安全无虞；与
-  `external-controller: 0.0.0.0:9090`（宿主只映射 127.0.0.1）口径一致。
+### 2. 节点的逐连接随机失败，单样本健康检查抓不住
 
-## 待排查（不影响签到主流程）
+机场中转入口的后端出口疑似逐连接轮询：同一节点单次测速通过（url-test
+每 5 分钟 1 个样本，判定「健康」），下一分钟真实请求仍可能 502。
+实测香港家宽节点延迟在 381ms↔4418ms 间摆动并间或测速失败。
 
-### 3. fallback 组不自动切换（重点）
+对策（已实施）：`HospitalClient._request` 对 5xx/传输错误有限重试
+（登录链路与拉列表，签到动作本身靠外层 5 分钟重试循环兜底）；
+check-all 限并发 3 + 错峰 1–3 秒/账号。
 
-`hospital` fallback 组设计意图是「直连优先，直连被封自动跌到最快节点，恢复自动切回」，
-但实测**不会自动切换**：
+### 3. 单点操作成功、批量操作全挂 ≠ 网络配置不平行
 
-- 现象：直连被封时，DIRECT 健康检查已确认 `alive=false`、节点侧 `hospital-auto`
-  已测出真实延迟（2409ms），`hospital` 组仍停在 `DIRECT`；`hospital` 组 `history` 一直为空。
-- 证据：容器启动后观察约 8 分钟仍停在 DIRECT；主动发请求返回 502（直连超时）后仍不切换。
-- 影响（已被 app 主动切换兜底）：签到主流程不受影响——app 赛前探针
-  `probe(switch_on_fail=True)` 会主动调 `mihomo_switch("hospital-auto")` 切到代理
-  （已实测到院 HTTP 200）。代价是：
-  - 小时级探针在封禁期间记 `down`（红）而非 `proxy`（蓝），热力图偏红；
-  - 每次签到首探失败后要等 20 秒复核才切，多一次无效探测。
-- 待查方向：mihomo `fallback` 组对内置 `DIRECT` 代理、以及嵌套子组 `hospital-auto`
-  的健康检查/切换触发条件；可能需要显式 `lazy: false` 或调整健康检查超时（全局
-  `health-check` 块）后再验证。
+所有请求同一条代理代码路径。逐请求随机失败率 p 时，单点操作（1–3 个请求）
+经常蒙混过关；check-all（9 账号 × 3–4 请求 ≈ 30 次）几乎必踩——
+现象上是「只有批量操作挂」，实质是请求数放大了同一失败率。
 
-### 4. 订阅 fetch 的 `forbid` 日志噪音
+### 4. 医院侧疑似地域/信用限制，可用节点池远小于订阅规模
 
-mihomo 拉订阅时反复打印
-`Unsolicited response received on idle HTTP channel starting with "forbid..."`
-（Go HTTP/2 协议层报错）。但订阅实际能加载成功（100 节点），疑似机场 CDN 对 HTTP/2
-请求的异常响应或用户信息头（`Subscription-Userinfo`）解析失败所致，暂不影响功能。
-日志量大时建议在机场侧确认订阅端点的 HTTP/2 兼容性，或临时把 mihomo 的订阅拉取
-降级到 HTTP/1.1。
+全量测速 100 个订阅节点，只有 18 个（港澳台的 16 个 + 2 个假节点）能拿到
+医院首页的 200/302；日美欧节点长期全挂。选节点时以实测为准，勿迷信订阅规模。
 
-### 5. 启动后第一轮健康检查误报
+## 已修复
 
-容器启动约 5 秒后跑的第一轮健康检查，对节点测出 `delay=0`（误判不可达），需等下一轮
-（实测约 3 分钟）才测出真实延迟。期间若依赖 fallback 自动切换，会短暂停留在 DIRECT。
-属启动时序问题，通常自愈；与第 3 条（fallback 不切换）叠加时会被放大。
+### v0.3.0
 
-### 6. 订阅里混入非节点条目
+- **fallback 组反复横跳/不切换**：组类型改 selector，出口决策收归 app 探针
+  （原 fallback 健康检查对 DIRECT 的判定不稳，与 app 逃生切换互相覆盖）。
+- **管理页代理卡片 404 刷屏**：节点列表改读 `/providers/proxies`
+  （订阅节点不注册在 `/proxies` 命名空间），按实测延迟排序、只列可达节点。
+- **节点死亡无自愈兜底**：探针在直连与当前节点双失败时触发全量重测
+  （`/group/hospital-auto/delay`），即时重选节点，不等 5 分钟周期。
+- **check-all 打爆节点链路**：并发 9 → 信号量限 3，错峰 0.5–2s → 1–3s。
+- **502 文案误导**（「代理节点或上游异常」在 DIRECT 被墙时也出现）：
+  双通道探针分开报告两通道状态，语义明确。
+- **失败探测 channel 恒为 direct**：双不通时记录当前实际出口。
+- **httpx INFO 日志噪音**：降为 WARNING。
+- **订阅假节点参与测速**：`exclude-filter` 剔除（剩余流量/套餐到期等）。
+- **订阅每天才刷新**：改为每小时（`interval: 3600`），节点上下线/换 IP 及时跟进。
 
-订阅解码后混入 `剩余流量：49.06 GB`、`套餐到期：长期有效` 等非节点行，会出现在
-`hospital-auto` 的节点列表里。url-test 实测不会选中它们，暂无功能影响；如需纯净列表
-可在订阅侧清理，或在配置里用 provider 的过滤规则剔除。
+### v0.2.0（部署修复）
+
+- `docker-compose.yml`：mihomo 镜像自带 `ENTRYPOINT /mihomo`，compose 的
+  `command: sh -c "sed ..."` 不覆盖 ENTRYPOINT，sed 注入从未执行。
+  修复：加 `entrypoint: ["sh", "-c"]`，命令改 list 单元素形式。
+- `config.template.yaml`：`allow-lan: false` 时 mixed-port 只绑容器内
+  127.0.0.1，app 容器经 docker 网络连不上。修复：`allow-lan: true`
+  （7890 未映射宿主，仅 docker 内网可达）。
 
 ## 备注
 
-- 镜像拉取：`docker.1ms.run` 镜像加速器对 `metacubex/mihomo` 的大层拉取会卡死，
-  部署侧改用 `dockerproxy.net/metacubex/mihomo:latest` 拉取后 `docker tag` 成本地镜像。
-  属部署环境问题，非代码问题，故不入库。
+- `Unsolicited response received on idle HTTP channel starting with "forbid..."`
+  日志：每 5 分钟整批出现于**健康检查**（非订阅拉取，订阅每天一次）——
+  某些节点出口对医院 URL 返回拦截页（出口 IP 也被医院拉黑），迟到字节
+  落在已空闲的 HTTP 连接上所致。无害，量大时可把 mihomo log-level 调 error。
+- 镜像拉取：`docker.1ms.run` 对 `metacubex/mihomo` 大层会卡死，部署侧改用
+  `dockerproxy.net/metacubex/mihomo:latest` 拉取后 `docker tag` 成本地镜像。
+- 启动后第一轮健康检查可能测出 `delay=0` 误报，下一轮（约 5 分钟）自愈。

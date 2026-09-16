@@ -264,17 +264,19 @@ async def _sign_one(user: models.User, period: str) -> None:
 
 
 async def _preflight(period: str) -> bool:
-    """赛前探针：医院系统不可达则二次确认后放弃整轮。
+    """赛前探针：双通道探测（测量 + 出口调整 + 落库），不可达则 20 秒后复核再放弃整轮。
 
     通知管理员（含诊断详情）+ 广播所有配了 SendKey 的启用用户（精简指引），
-    避免系统故障日出现不知情缺勤。探测失败 20 秒后复核，防止单次抖动误杀整轮。
+    避免系统故障日出现不知情缺勤。复核防止单次抖动误杀整轮。
     """
-    first = await probe(switch_on_fail=False)  # 首探不逃生：直连秒级抖动不该切代理
+    first = await probe()
+    models.record_probe(first.ok, first.latency_ms, first.detail, first.channel)
     if first.ok:
         return True
     log.warning("赛前探测失败（%s），20 秒后复核", first.detail)
     await asyncio.sleep(20)
-    second = await probe()  # 复核允许切代理逃生：直连真被封则走代理完成本轮
+    second = await probe()
+    models.record_probe(second.ok, second.latency_ms, second.detail, second.channel)
     if second.ok:
         return True
     log.warning("赛前探测复核仍失败（%s），本轮签到放弃", second.detail)
