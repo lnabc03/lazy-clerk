@@ -1,0 +1,51 @@
+<!-- 医院系统可及性热力图（近 7 天 × 24 小时），登录页/用户页/管理页共用。
+     上下文需要：heatmap（models.probe_heatmap）、probe_latest（models.latest_probe）；
+     可选 probe_url：传入则渲染「立即检测」按钮（fetch POST 该地址并弹结果）。 -->
+<div class="card shadow-sm mb-3">
+    <div class="card-body p-3">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <h6 class="card-title mb-0">医院系统可及性</h6>
+            <div class="d-flex align-items-center gap-2">
+                {% if probe_latest %}
+                <span class="badge bg-{{ 'success' if probe_latest["ok"] else 'danger' }}">
+                    {{ '当前正常' if probe_latest["ok"] else '当前不可达' }}
+                </span>
+                {% endif %}
+                {% if probe_url %}
+                <button class="btn btn-outline-secondary btn-sm py-0"
+                        onclick="probeNow('{{ probe_url }}')">立即检测</button>
+                {% endif %}
+            </div>
+        </div>
+        <div class="mb-2">
+            {% for day in heatmap %}
+            <div class="probe-row">
+                <span class="probe-day">{{ day.date[5:] }}</span>
+                {% for cell in day.cells %}
+                <span class="probe-cell {{ 'ok' if cell is sameas true else ('fail' if cell is sameas false else 'none') }}"
+                      title="{{ day.date }} {{ '%02d' % loop.index0 }}:00 时段 {{ '正常' if cell is sameas true else ('不可达' if cell is sameas false else '无数据') }}"></span>
+                {% endfor %}
+            </div>
+            {% endfor %}
+        </div>
+        <p class="probe-legend mb-0">
+            近 7 天 × 24 小时，每小时自动探测。
+            <span class="probe-cell ok"></span> 正常
+            <span class="probe-cell fail"></span> 不可达
+            <span class="probe-cell none"></span> 无数据
+            {% if probe_latest and not probe_latest["ok"] %}
+            <br>系统不可达时自动签到会跳过整轮，请换手机流量登录医院系统人工签到。
+            {% endif %}
+        </p>
+    </div>
+</div>
+{% if probe_url %}
+<script>
+async function probeNow(url) {
+    const r = await fetch(url, {method: "POST"});
+    const d = await r.json();
+    alert(d.msg);
+    if (d.ok) location.reload();
+}
+</script>
+{% endif %}

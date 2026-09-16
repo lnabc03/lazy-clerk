@@ -104,7 +104,7 @@ def make_badge(log) -> dict | None:
     result, message = log["result"], (log["message"] or "")
     if result == "checked":
         text = message.replace("[检测] ", "")
-        good = any(k in text for k in ("已签到", "已确认", "无排班"))
+        good = any(k in text for k in ("已签到", "已确认", "无排班", "借假"))
         return {"text": text, "color": "success" if good else "danger", "title": message}
     return {"text": RESULT_LABEL.get(result, result),
             "color": RESULT_COLOR.get(result, "secondary"), "title": message}

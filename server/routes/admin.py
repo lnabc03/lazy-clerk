@@ -62,7 +62,10 @@ async def admin_page(request: Request, msg: str = "", error: str = ""):
     return render(request, "admin.html", msg=msg, error=error,
                   users=users,
                   unused_invites=models.list_unused_invites(),
-                  admin_sendkey_masked=mask_sendkey(admin_sendkey))
+                  admin_sendkey_masked=mask_sendkey(admin_sendkey),
+                  heatmap=models.probe_heatmap(days=7),
+                  probe_latest=models.latest_probe(),
+                  probe_url="/admin/probe")
 
 
 @router.post("/users/{user_id}/toggle")

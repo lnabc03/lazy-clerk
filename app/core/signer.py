@@ -40,7 +40,7 @@ RESULT_NO_SCHEDULE = "no_schedule"  # 未排班/休假
 RESULT_MANUAL = "manual"         # 需人工处理（迟到/补签/借假等）
 RESULT_CHECKED = "checked"       # 管理页手动检测（非签到动作）
 
-# 已签状态；其余非空状态（-1 借假 / -3 迟到 / -4 补签待确认 ...）均需人工
+# 已签状态；-1 借假＝无需签到；其余非空状态（-3 迟到 / -4 补签待确认 ...）均需人工
 SIGNED = {1, 10}
 
 STATUS_TEXT = {
@@ -76,6 +76,9 @@ def decide(row: dict) -> SignOutcome:
         return SignOutcome(RESULT_MANUAL, f"补签场景（DayOff={day_off}），请人工处理")
     if status in (None, 0):
         return SignOutcome("sign", "待签到")  # 内部动作，不是终态
+    if status == -1:
+        # 借假＝已批准的假，与请假同待遇：终态不重试，告知本人（若非本人借假即异常信号）
+        return SignOutcome(RESULT_NO_SCHEDULE, "今日已借假，无需签到", notify=True)
     return SignOutcome(RESULT_MANUAL, f"状态异常（SignInStatus={status}），请人工处理")
 
 

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Form, Request
+from fastapi.responses import JSONResponse
 
 from app import models
 from app.core import signer
@@ -25,7 +26,7 @@ async def login_page(request: Request, msg: str = "", error: str = ""):
     if current_user(request):
         return redirect("/me")
     return render(request, "login.html", msg=msg, error=error,
-                  heatmap=models.probe_heatmap(days=14),
+                  heatmap=models.probe_heatmap(days=7),
                   probe_latest=models.latest_probe())
 
 
@@ -86,7 +87,22 @@ async def me(request: Request, msg: str = "", error: str = ""):
     return render(request, "me.html", msg=msg, error=error, user=user,
                   sendkey_masked=mask_sendkey(user.sendkey),
                   next_run=next_run_text(),
-                  logs=models.logs_for_user(user.id, days=7))
+                  logs=models.logs_for_user(user.id, days=7),
+                  heatmap=models.probe_heatmap(days=7),
+                  probe_latest=models.latest_probe(),
+                  probe_url="/me/probe")
+
+
+@router.post("/me/probe")
+async def probe_self(request: Request):
+    """用户自助探测医院系统连通性（匿名 GET SSO 首页），结果入 probe_logs。fetch 调用。"""
+    if not current_user(request):
+        return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
+    from app.core.client import probe
+    p = await probe()
+    models.record_probe(p.ok, p.latency_ms, p.detail)
+    status = "✅ 可达" if p.ok else "❌ 不可达"
+    return JSONResponse({"ok": True, "msg": f"{status}：{p.detail}（{p.latency_ms}ms）"})
 
 
 @router.post("/me/sendkey")

@@ -33,6 +33,13 @@ def test_decide_already_signed():
     assert signer.decide(_row(status=10)).result == signer.RESULT_SKIPPED
 
 
+def test_decide_leave_status():
+    """借假（-1）＝已批准的假 → no_schedule 终态 + 告知本人；迟到等仍判需人工。"""
+    o = signer.decide(_row(status=-1))
+    assert o.result == signer.RESULT_NO_SCHEDULE
+    assert o.notify and not o.retryable
+
+
 def test_decide_manual():
     assert signer.decide(_row(status=-3)).result == signer.RESULT_MANUAL   # 迟到
     assert signer.decide(_row(status=None, day_off=1)).result == signer.RESULT_MANUAL  # 补签
