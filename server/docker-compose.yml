@@ -16,16 +16,17 @@ services:
   mihomo:
     profiles: ["proxy"]
     image: metacubex/mihomo:latest
+    # 该镜像自带 ENTRYPOINT /mihomo，必须覆盖为空/显式 sh -c，否则下面
+    # 的 sed 注入脚本会被当成参数喂给 /mihomo 而不是作为 shell 执行。
+    entrypoint: ["sh", "-c"]
     env_file: .env
     volumes:
       - ./mihomo/config.template.yaml:/template.yaml:ro
       - mihomo-cache:/root/.config/mihomo
-    # 启动时把订阅链接/API 密钥注入配置模板（模板入库，敏感值只在 .env）
-    command: >
-      sh -c "sed -e \"s|__SUB_URL__|$${PROXY_SUB_URL}|g\"
-                 -e \"s|__SECRET__|$${MIHOMO_SECRET}|g\"
-                 /template.yaml > /root/.config/mihomo/config.yaml
-             && exec mihomo -d /root/.config/mihomo"
+    # 启动时把订阅链接/API 密钥注入配置模板（模板入库，敏感值只在 .env）。
+    # 用 list 形式把整段脚本作为单个参数交给 sh -c，避免 compose 按空白拆分。
+    command:
+      - 'sed -e "s|__SUB_URL__|$${PROXY_SUB_URL}|g" -e "s|__SECRET__|$${MIHOMO_SECRET}|g" /template.yaml > /root/.config/mihomo/config.yaml && exec /mihomo -d /root/.config/mihomo'
     ports:
       - "127.0.0.1:9090:9090"   # 节点管理 API，仅本机（配 secret）
     restart: unless-stopped

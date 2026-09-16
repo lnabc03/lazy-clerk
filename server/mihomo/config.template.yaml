@@ -1,7 +1,9 @@
 # mihomo 配置模板：订阅链接与 API 密钥在容器启动时从 .env 注入（见 docker-compose.yml）。
 # 分流策略：仅医院域名走 hospital 组（直连优先，被封自动切最快节点），其余全部直连。
 mixed-port: 7890
-allow-lan: false
+# 必须 true：app 容器经 docker 网络用 mihomo:7890 访问，mixed-port 需绑定
+# 到容器网卡（0.0.0.0）。7890 未映射到宿主，仅 docker 内网可达，安全无虞。
+allow-lan: true
 log-level: warning
 external-controller: 0.0.0.0:9090   # 容器内监听；宿主只映射 127.0.0.1，且有 secret
 secret: __SECRET__
