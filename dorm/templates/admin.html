@@ -20,10 +20,14 @@
     <div class="card-body">
         <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
             <h6 class="card-title mb-0">账号总览</h6>
-            <form method="post" action="/admin/check-all"
-                  onsubmit="return confirm('将登录医院平台刷新所有启用账号的当日状态，继续？')">
-                <button class="btn btn-primary btn-sm">签到状态检测</button>
-            </form>
+            <div class="d-flex gap-2">
+                <button class="btn btn-outline-secondary btn-sm"
+                        onclick="post('/admin/probe', {})">连通性检测</button>
+                <form method="post" action="/admin/check-all"
+                      onsubmit="return confirm('将登录医院平台刷新所有启用账号的当日状态，继续？')">
+                    <button class="btn btn-primary btn-sm">签到状态检测</button>
+                </form>
+            </div>
         </div>
         {% if users %}
         <table class="table table-sm table-striped mb-0">

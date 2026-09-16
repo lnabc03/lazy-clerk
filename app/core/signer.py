@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 from .. import models
 from ..config import settings
-from .client import AuthError, HospitalClient, LoginError
+from .client import AuthError, HospitalClient, LoginError, probe, probe_cached
 from .notify import notify, notify_user_and_admin
 
 log = logging.getLogger("lazy-clerk.signer")
@@ -31,6 +31,7 @@ LogFn = Callable[[int, str, str, str, str], None]
 PERIOD_NAME = {"am": "上午", "pm": "下午"}
 STOP_TIME = {"am": time(7, 28), "pm": time(14, 23)}
 RETRY_INTERVAL = 300  # 秒
+MAX_ATTEMPTS = 3      # 含首试。SSO 不可达是网络故障，短时间不会自愈，多试无益
 
 RESULT_SUCCESS = "success"
 RESULT_FAILED = "failed"
@@ -141,10 +142,18 @@ async def push_no_sign_needed(user: models.User, period: str, reason: str) -> No
                      sendkey=user.sendkey)
 
 
-async def push_final_failure(user: models.User, period: str, reason: str) -> None:
+async def push_final_failure(user: models.User, period: str, reason: str,
+                             attempts: int) -> None:
+    # 附连通性诊断：区分「系统不可达（网络被封）」与「账号侧问题」，减少误判
+    p = await probe_cached()
+    diag = (f"连通性探测：医院系统不可达（{p.detail}）——当前网络出口疑似被防火墙拦截，"
+            "非账号问题，请换手机流量人工签到。"
+            if not p.ok else
+            "连通性探测：医院系统可正常访问——疑似账号侧问题。")
     await notify_user_and_admin(
         f"❌签到失败｜{user.nickname}｜{_period_label(period)}",
-        f"{reason}\n重试已耗尽，签到窗口即将关闭，请立即人工签到。", user.sendkey)
+        f"{reason}\n已尝试 {attempts} 次，签到窗口即将关闭，请立即人工签到。\n{diag}",
+        user.sendkey)
 
 
 async def push_manual_needed(user: models.User, period: str, reason: str) -> None:
@@ -186,6 +195,7 @@ async def sign_user_with_retry(
     if log_fn is None:
         log_fn = lambda uid, date, p, result, msg: models.add_log(uid, date, p, result, msg)  # noqa: E731
     today = datetime.now(TZ).strftime("%Y-%m-%d")
+    attempts = 1
 
     while True:
         outcome = await sign_user_once(user, period)
@@ -211,13 +221,15 @@ async def sign_user_with_retry(
             return outcome
 
         now = datetime.now(TZ).time()
-        if now >= STOP_TIME[period]:
+        if attempts >= MAX_ATTEMPTS or now >= STOP_TIME[period]:
             log_fn(user.id, today, period, RESULT_FAILED,
-                   f"重试耗尽: {outcome.message}")
-            await push_final_failure(user, period, outcome.message)
+                   f"重试耗尽（{attempts} 次）: {outcome.message}")
+            await push_final_failure(user, period, outcome.message, attempts)
             return outcome
 
-        log.info("签到失败将重试 user=%s period=%s: %s", user.account, period, outcome.message)
+        log.info("签到失败将重试（第 %d/%d 次）user=%s period=%s: %s",
+                 attempts + 1, MAX_ATTEMPTS, user.account, period, outcome.message)
+        attempts += 1
         # 拟人化：重试间隔 5 分钟 ±1 分钟随机
         await asyncio.sleep(RETRY_INTERVAL + random.uniform(-60, 60))
 
@@ -245,13 +257,36 @@ async def _sign_one(user: models.User, period: str) -> None:
         log.exception("账号签到流程崩溃（已隔离）user=%s", user.account)
 
 
+async def _preflight() -> bool:
+    """赛前探针：医院系统不可达则二次确认后放弃整轮，只推管理员一条。
+
+    被封 IP 时避免 N 人 × 3 次无效重试持续敲门。探测失败 20 秒后复核，
+    防止单次抖动误杀整轮。
+    """
+    first = await probe()
+    if first.ok:
+        return True
+    log.warning("赛前探测失败（%s），20 秒后复核", first.detail)
+    await asyncio.sleep(20)
+    second = await probe()
+    if second.ok:
+        return True
+    log.warning("赛前探测复核仍失败（%s），本轮签到放弃", second.detail)
+    await notify(f"🚨医院系统不可达｜{datetime.now(TZ).strftime('%m-%d')}",
+                 f"签到前探测连续失败（{second.detail}），本轮签到未执行。\n"
+                 "当前网络出口疑似被医院防火墙拦截，请换手机流量人工签到。")
+    return False
+
+
 async def sign_all(period: str) -> None:
-    """定时任务入口：每个账号一个独立任务，错峰启动、互不阻塞。
+    """定时任务入口：赛前探测 → 每个账号一个独立任务，错峰启动、互不阻塞。
 
     不能顺序 await——某账号进入 5 分钟重试循环会阻塞后面所有账号
     （实测：一人请假被拒，后续账号全部错过签到窗口）。
     """
     log.info("开始 %s 时段签到", period)
+    if not await _preflight():
+        return
     users = [u for u in models.list_users() if u.enabled]
     tasks = []
     for i, user in enumerate(users):

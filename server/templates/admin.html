@@ -12,10 +12,13 @@
     <div class="card-body">
         <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
             <h6 class="card-title mb-0">账号总览</h6>
-            <form method="post" action="/admin/check-all"
-                  onsubmit="return confirm('将登录医院平台刷新所有启用账号的当日状态，继续？')">
-                <button class="btn btn-primary btn-sm">签到状态检测</button>
-            </form>
+            <div class="d-flex gap-2">
+                <button class="btn btn-outline-secondary btn-sm" onclick="probeNow()">连通性检测</button>
+                <form method="post" action="/admin/check-all"
+                      onsubmit="return confirm('将登录医院平台刷新所有启用账号的当日状态，继续？')">
+                    <button class="btn btn-primary btn-sm">签到状态检测</button>
+                </form>
+            </div>
         </div>
         {% if users %}
         <table class="table table-sm table-striped mb-0">
@@ -130,6 +133,11 @@ async function delUser(id, nickname) {
     const r = await fetch(`/admin/users/${id}`, {method: "DELETE"});
     if (r.ok) location.reload();
     else alert("删除失败");
+}
+async function probeNow() {
+    const r = await fetch("/admin/probe", {method: "POST"});
+    const d = await r.json();
+    alert(d.msg);
 }
 </script>
 {% endblock %}

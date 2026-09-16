@@ -208,6 +208,18 @@ async def remove_user(request: Request, user_id: int):
 
 # ---------- 签到操作 ----------
 
+@app.post("/admin/probe")
+async def probe_now(request: Request):
+    """手动探测医院系统连通性（匿名 GET SSO 首页），结果入 probe_logs。fetch 调用。"""
+    if not is_admin(request):
+        return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
+    from app.core.client import probe
+    p = await probe()
+    models.record_probe(p.ok, p.latency_ms, p.detail)
+    status = "✅ 可达" if p.ok else "❌ 不可达"
+    return JSONResponse({"ok": True, "msg": f"{status}：{p.detail}（{p.latency_ms}ms）"})
+
+
 @app.post("/admin/sign-now/{user_id}")
 async def sign_now(request: Request, user_id: int):
     if not is_admin(request):

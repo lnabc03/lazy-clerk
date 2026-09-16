@@ -24,7 +24,9 @@ async def index(request: Request):
 async def login_page(request: Request, msg: str = "", error: str = ""):
     if current_user(request):
         return redirect("/me")
-    return render(request, "login.html", msg=msg, error=error)
+    return render(request, "login.html", msg=msg, error=error,
+                  heatmap=models.probe_heatmap(days=14),
+                  probe_latest=models.latest_probe())
 
 
 @router.post("/login")

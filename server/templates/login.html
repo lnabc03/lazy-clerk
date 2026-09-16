@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% block title %}登录 · lazy-clerk{% endblock %}
 {% block content %}
-<div class="card card-narrow shadow-sm">
+<div class="mx-auto" style="max-width: 420px; margin-top: 6rem !important;">
+<div class="card shadow-sm mb-3">
     <div class="card-body p-4">
         <h4 class="text-center mb-1">lazy-clerk</h4>
         <p class="text-center text-muted small mb-4">实习考勤自动签到</p>
@@ -42,5 +43,47 @@
             </form>
         </div>
     </div>
+</div>
+
+<div class="card shadow-sm mb-5">
+    <div class="card-body p-3">
+        <div class="d-flex justify-content-between align-items-baseline mb-2">
+            <h6 class="card-title mb-0">医院系统可及性</h6>
+            {% if probe_latest %}
+            <span class="small">
+                {% if probe_latest["ok"] %}
+                <span class="badge bg-success">当前正常</span>
+                {% else %}
+                <span class="badge bg-danger">当前不可达</span>
+                {% endif %}
+            </span>
+            {% endif %}
+        </div>
+        {% if heatmap %}
+        <div class="mb-2">
+            {% for day in heatmap %}
+            <div class="probe-row">
+                <span class="probe-day">{{ day.date[5:] }}</span>
+                {% for cell in day.cells %}
+                <span class="probe-cell {{ 'ok' if cell is sameas true else ('fail' if cell is sameas false else 'none') }}"
+                      title="{{ day.date }} {{ '%02d' % loop.index0 }}:00–{{ '%02d' % loop.index0 }}:59 {{ '正常' if cell is sameas true else ('不可达' if cell is sameas false else '无数据') }}"></span>
+                {% endfor %}
+            </div>
+            {% endfor %}
+        </div>
+        <p class="probe-legend mb-0">
+            近 14 天 × 24 小时，每小时自动探测。
+            <span class="probe-cell ok"></span> 正常
+            <span class="probe-cell fail"></span> 不可达
+            <span class="probe-cell none"></span> 无数据
+            {% if probe_latest and not probe_latest["ok"] %}
+            <br>系统不可达时自动签到会跳过整轮，请换手机流量登录医院系统人工签到。
+            {% endif %}
+        </p>
+        {% else %}
+        <p class="small text-muted mb-0">暂无探测数据。</p>
+        {% endif %}
+    </div>
+</div>
 </div>
 {% endblock %}

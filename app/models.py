@@ -218,6 +218,51 @@ def cleanup_logs(days: int = 90) -> int:
     return cur.rowcount
 
 
+# ---------- probe_logs（医院系统可及性探测） ----------
+
+def record_probe(ok: bool, latency_ms: int | None, detail: str) -> None:
+    conn().execute(
+        "INSERT INTO probe_logs (ok, latency_ms, detail, created_at) VALUES (?,?,?,?)",
+        (int(ok), latency_ms, detail[:200], now_str()),
+    )
+    conn().commit()
+
+
+def latest_probe() -> sqlite3.Row | None:
+    return conn().execute(
+        "SELECT * FROM probe_logs ORDER BY id DESC LIMIT 1").fetchone()
+
+
+def probe_heatmap(days: int = 14) -> list[dict]:
+    """近 N 天 × 24 小时可及性网格（登录页热力图用）。
+
+    返回按日期升序的行列表：{date, cells: [True|False|None] × 24}，
+    True=该小时探测全部可达，False=有失败，None=无数据。
+    """
+    cutoff = (datetime.now(TZ) - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+    rows = conn().execute(
+        "SELECT created_at, ok FROM probe_logs WHERE created_at>=? ORDER BY created_at",
+        (cutoff,)).fetchall()
+    grid: dict[str, dict[int, bool]] = {}
+    for r in rows:
+        date, hour = r["created_at"][:10], int(r["created_at"][11:13])
+        cell = grid.setdefault(date, {})
+        cell[hour] = cell.get(hour, True) and bool(r["ok"])
+    today = datetime.now(TZ).date()
+    return [
+        {"date": (d := (today - timedelta(days=i)).strftime("%Y-%m-%d")),
+         "cells": [grid.get(d, {}).get(h) for h in range(24)]}
+        for i in range(days - 1, -1, -1)
+    ]
+
+
+def cleanup_probes(days: int = 40) -> int:
+    cutoff = (datetime.now(TZ) - timedelta(days=days)).strftime("%Y-%m-%d")
+    cur = conn().execute("DELETE FROM probe_logs WHERE created_at<?", (cutoff,))
+    conn().commit()
+    return cur.rowcount
+
+
 # ---------- settings ----------
 
 def get_setting(key: str) -> str | None:

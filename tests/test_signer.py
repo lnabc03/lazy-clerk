@@ -1,13 +1,19 @@
 """签到判定逻辑单测：find_target_row / decide（设计稿 4.1）。"""
 import asyncio
+from datetime import time
 
 from app import models
 from app.core import signer
+from app.core.client import ProbeResult
 
 
 def _row(status=None, day_off=0, date="2026-09-11", time_name="上午", rid=1):
     return {"ID": rid, "WeekDate": date, "TimeName": time_name,
             "SignInStatus": status, "DayOff": day_off}
+
+
+async def _ok_probe(timeout=8.0):
+    return ProbeResult(True, "HTTP 200", 10)
 
 
 def test_find_target_row():
@@ -89,6 +95,7 @@ def test_sign_all_slow_account_does_not_block_others(monkeypatch):
     """回归（v0.1.0 缺陷）：前序账号进入重试循环不得阻塞后续账号。"""
     monkeypatch.setattr(models, "list_users", lambda: [_user(1, "a"), _user(2, "b")])
     monkeypatch.setattr(signer.random, "uniform", lambda lo, hi: 0)
+    monkeypatch.setattr(signer, "probe", _ok_probe)
 
     b_done = asyncio.Event()
 
@@ -110,6 +117,7 @@ def test_sign_all_crash_isolated(monkeypatch):
     """单账号流程崩溃不影响其他账号执行。"""
     monkeypatch.setattr(models, "list_users", lambda: [_user(1, "a"), _user(2, "b")])
     monkeypatch.setattr(signer.random, "uniform", lambda lo, hi: 0)
+    monkeypatch.setattr(signer, "probe", _ok_probe)
     ran = []
 
     async def fake_with_retry(user, period, log_fn=None):
@@ -121,3 +129,56 @@ def test_sign_all_crash_isolated(monkeypatch):
     monkeypatch.setattr(signer, "sign_user_with_retry", fake_with_retry)
     asyncio.run(signer.sign_all("am"))
     assert ran == ["a", "b"]
+
+
+def test_retry_capped_at_max_attempts(monkeypatch):
+    """可重试失败最多尝试 MAX_ATTEMPTS 次（SSO 不可达不会自愈，多试无益）。"""
+    calls = []
+
+    async def fake_once(user, period):
+        calls.append("try")
+        return signer.SignOutcome(signer.RESULT_FAILED, "SSO 网络错误", retryable=True)
+
+    async def fake_push(user, period, reason, attempts):
+        calls.append(f"push:{attempts}")
+
+    monkeypatch.setattr(signer, "sign_user_once", fake_once)
+    monkeypatch.setattr(signer, "push_final_failure", fake_push)
+    monkeypatch.setattr(signer, "RETRY_INTERVAL", -100)  # sleep 负值立即返回
+    monkeypatch.setattr(signer, "STOP_TIME", {"am": time(23, 59), "pm": time(23, 59)})
+    monkeypatch.setattr(signer.random, "uniform", lambda lo, hi: 0)
+
+    outcome = asyncio.run(signer.sign_user_with_retry(
+        _user(1, "a"), "am", log_fn=lambda *a: None))
+    assert outcome.result == signer.RESULT_FAILED
+    assert calls.count("try") == signer.MAX_ATTEMPTS == 3
+    assert f"push:{signer.MAX_ATTEMPTS}" in calls
+
+
+def test_sign_all_preflight_aborts_when_unreachable(monkeypatch):
+    """赛前探测连续失败 → 整轮放弃并通知管理员，不触碰任何账号。"""
+    probes = []
+
+    async def fake_probe(timeout=8.0):
+        probes.append(1)
+        return ProbeResult(False, "连接超时（疑似被防火墙拦截）", 8000)
+
+    async def fake_sleep(seconds):
+        pass
+
+    pushed = []
+
+    async def fake_notify(title, msg, sendkey=None):
+        pushed.append(title)
+
+    def forbidden_list():
+        raise AssertionError("赛前守卫失败不应进入账号遍历")
+
+    monkeypatch.setattr(signer, "probe", fake_probe)
+    monkeypatch.setattr(signer.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(signer, "notify", fake_notify)
+    monkeypatch.setattr(models, "list_users", forbidden_list)
+
+    asyncio.run(signer.sign_all("am"))
+    assert len(probes) == 2  # 一次失败 + 一次复核
+    assert pushed and "不可达" in pushed[0]

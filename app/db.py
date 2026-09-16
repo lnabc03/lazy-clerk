@@ -35,6 +35,14 @@ CREATE TABLE IF NOT EXISTS sign_logs (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sign_logs_user_date ON sign_logs(user_id, date);
+CREATE TABLE IF NOT EXISTS probe_logs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ok         INTEGER NOT NULL,
+    latency_ms INTEGER,
+    detail     TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_probe_logs_time ON probe_logs(created_at);
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL

@@ -47,6 +47,9 @@ async def cmd_sign(period: str | None, jitter: bool) -> int:
     deleted = models.cleanup_logs(days=90)
     if deleted:
         print(f"已清理 90 天前日志 {deleted} 条")
+    deleted = models.cleanup_probes(days=40)
+    if deleted:
+        print(f"已清理 40 天前探测记录 {deleted} 条")
     return 0
 
 

@@ -1,7 +1,8 @@
-"""管理员路由：登录、账号总览、启用/停用、删除、邀请码、签到状态检测、手动签到。"""
+"""管理员路由：登录、账号总览、启用/停用、删除、邀请码、签到状态检测、手动签到、连通性探测。"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Form, Request
+from fastapi.responses import JSONResponse
 
 from app import models
 from app.config import settings
@@ -99,6 +100,18 @@ async def delete_invite(request: Request, invite_id: int):
     if models.delete_invite(invite_id):
         return redirect("/admin", msg="邀请码已删除")
     return redirect("/admin", error="该邀请码已被使用，不可删除")
+
+
+@router.post("/probe")
+async def probe_now(request: Request):
+    """手动探测医院系统连通性（匿名 GET SSO 首页），结果入 probe_logs 供热力图。"""
+    if not is_admin(request):
+        return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
+    from app.core.client import probe
+    p = await probe()
+    models.record_probe(p.ok, p.latency_ms, p.detail)
+    status = "✅ 可达" if p.ok else "❌ 不可达"
+    return {"ok": True, "msg": f"{status}：{p.detail}（{p.latency_ms}ms）"}
 
 
 @router.post("/check-all")

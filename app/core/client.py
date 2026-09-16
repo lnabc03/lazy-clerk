@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import re
+import time
+from dataclasses import dataclass
 
 import httpx
 
@@ -33,6 +35,51 @@ class AuthError(Exception):
 
 class LoginError(Exception):
     """登录链路异常（网络错误、页面结构变化等）——可重试。"""
+
+
+# ---------- 连通性探针 ----------
+
+@dataclass
+class ProbeResult:
+    ok: bool
+    detail: str
+    latency_ms: int
+
+
+async def probe(timeout: float = 8.0) -> ProbeResult:
+    """连通性探针：匿名 GET SSO 首页。
+
+    不登录、不带任何凭据，与浏览器打开登录页完全同构——封禁的触发面在
+    认证接口的频次/失败率，分钟级以下的匿名 GET 不会增加封禁概率。
+    """
+    start = time.monotonic()
+    latency = lambda: int((time.monotonic() - start) * 1000)  # noqa: E731
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True,
+                                     headers={"User-Agent": UA}) as c:
+            r = await c.get(SSO_BASE + "/")
+        if r.status_code < 500:
+            return ProbeResult(True, f"HTTP {r.status_code}", latency())
+        return ProbeResult(False, f"HTTP {r.status_code} 服务端错误", latency())
+    except httpx.ConnectTimeout:
+        return ProbeResult(False, "连接超时（疑似被防火墙拦截）", latency())
+    except httpx.ConnectError as e:
+        return ProbeResult(False, f"连接失败: {type(e).__name__}", latency())
+    except httpx.HTTPError as e:
+        return ProbeResult(False, f"网络错误: {type(e).__name__}", latency())
+
+
+_probe_cache: tuple[float, ProbeResult] | None = None
+
+
+async def probe_cached(ttl: float = 60.0) -> ProbeResult:
+    """带 60 秒缓存的探测：并行场景（多人同时失败告警）共享一次结果。"""
+    global _probe_cache
+    if _probe_cache and time.monotonic() - _probe_cache[0] < ttl:
+        return _probe_cache[1]
+    result = await probe()
+    _probe_cache = (time.monotonic(), result)
+    return result
 
 
 class HospitalClient:

@@ -9,6 +9,15 @@
         body { background: #f5f6f8; }
         .card-narrow { max-width: 420px; margin: 6rem auto; }
         .table-sm td, .table-sm th { vertical-align: middle; }
+        /* 医院系统可及性热力图（登录页）：近 14 天 × 24 小时 */
+        .probe-row { display: flex; align-items: center; gap: 2px; margin-bottom: 2px; }
+        .probe-day { width: 36px; font-size: 10px; color: #6c757d; flex: none; }
+        .probe-cell { width: 11px; height: 11px; border-radius: 2px; flex: none; }
+        .probe-cell.ok { background: #198754; }
+        .probe-cell.fail { background: #dc3545; }
+        .probe-cell.none { background: #e9ecef; }
+        .probe-legend { font-size: 10px; color: #6c757d; }
+        .probe-legend .probe-cell { display: inline-block; vertical-align: -1px; }
     </style>
 </head>
 <body>
