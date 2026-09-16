@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS probe_logs (
     ok         INTEGER NOT NULL,
     latency_ms INTEGER,
     detail     TEXT,
+    channel    TEXT NOT NULL DEFAULT 'direct',  -- direct=直连 / proxy=代理出口
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_probe_logs_time ON probe_logs(created_at);
@@ -64,10 +65,15 @@ def init() -> None:
 
 
 def _migrate() -> None:
-    """存量库迁移：invite_codes 补 code 明文字段（v0.3 起明文存储）。"""
+    """存量库迁移。"""
+    # invite_codes 补 code 明文字段（v0.3 起明文存储）
     cols = {r["name"] for r in _conn.execute("PRAGMA table_info(invite_codes)")}
     if "code" not in cols:
         _conn.execute("ALTER TABLE invite_codes ADD COLUMN code TEXT")
+    # probe_logs 补 channel 出口字段（v0.1.4 起区分直连/代理）
+    cols = {r["name"] for r in _conn.execute("PRAGMA table_info(probe_logs)")}
+    if cols and "channel" not in cols:
+        _conn.execute("ALTER TABLE probe_logs ADD COLUMN channel TEXT NOT NULL DEFAULT 'direct'")
 
 
 def conn() -> sqlite3.Connection:

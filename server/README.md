@@ -16,11 +16,13 @@
   手动代签、管理员设置
 - 医院系统可及性热力图（近 7 天 × 24 小时，每小时匿名探测），登录页/用户页/管理页
   同图展示；可及性状态翻转时自动推送管理员（封禁/解封第一时间知晓）
-- 每天 6:53–6:58 / 13:53–13:58 随机时刻自动签到，多账号并行、随机间隔 10–40 秒错峰
+- 每天 6:53–6:58 / 13:00–13:05 随机时刻自动签到，多账号并行、随机间隔 10–40 秒错峰
 - 赛前守卫：签到开跑前探测医院系统，连续两次不可达则整轮跳过并通知管理员，
   不在被封网络上无效敲门
 - 失败最多重试 2 次（共 3 次尝试，间隔约 5 分钟随机）；最终失败推送附连通性诊断，
   区分「系统不可达」与「账号问题」
+- 代理逃生通道（可选）：医院封服务器 IP 时，mihomo sidecar 直连优先、被封自动切
+  订阅里最快节点、恢复自动切回；热力图蓝格标记代理时段，出口切换推送管理员
 - 签到结果微信推送：成功推本人，请假/失败/需人工分别按场景推本人或管理员+本人
 - 登录防爆破限流（用户/管理员入口独立计数）
 
@@ -88,8 +90,28 @@ docker compose exec lazy-clerk python server/scripts/smoke.py --stage S5 --sendk
 | --- | --- |
 | 看日志 | `docker compose logs -f --tail 100` |
 | 重启 | `docker compose restart` |
-| 升级（压缩包方式） | 解压新包覆盖代码（包内不含 `.env` 与 `data/`，覆盖安全）→ `docker compose up -d --build` |
+| 升级（压缩包方式） | 解压新包覆盖代码（包内不含 `.env` 与 `data/`，覆盖安全）→ `docker compose up -d --build`（启用了代理则用 `docker compose --profile proxy up -d --build`） |
 | 进容器排查 | `docker compose exec lazy-clerk bash` |
+| 代理节点管理 | `server/scripts/node.sh list / use <节点名> / direct` |
+
+## IP 被封：启用代理逃生通道
+
+医院防火墙按 IP 画像封禁（机房 IP、异常集中的校园网 IP 都可能中招），解封周期不可控。
+本形态内置可选的 mihomo sidecar：签到流量直连优先，直连健康检查失败（被封）自动切到
+订阅里延迟最低的节点，直连恢复自动切回。全程无需值守。
+
+启用（一次性）：
+
+```bash
+cd server
+# .env 追加四行（见 .env.example 注释）：PROXY_SUB_URL / MIHOMO_SECRET / PROXY_URL / MIHOMO_API
+docker compose --profile proxy up -d
+```
+
+之后管理页热力图会出现蓝格（代理正常），出口切换时管理员会收到 🔀 推送；
+管理页「代理出口」卡片可随时查看当前出口、各节点实测延迟并手动切换
+（等价于 `server/scripts/node.sh`）。
+注意：商用节点的出口同样是机房 IP，画像风险并未消除只是转移——个人版/宿舍版冗余保留。
 
 ## 故障排查
 

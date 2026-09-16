@@ -149,10 +149,13 @@ async def push_final_failure(user: models.User, period: str, reason: str,
                              attempts: int) -> None:
     # 附连通性诊断：区分「系统不可达（网络被封）」与「账号侧问题」，减少误判
     p = await probe_cached()
-    diag = (f"连通性探测：医院系统不可达（{p.detail}）——当前网络出口疑似被防火墙拦截，"
-            "非账号问题，请换手机流量人工签到。"
-            if not p.ok else
-            "连通性探测：医院系统可正常访问——疑似账号侧问题。")
+    if not p.ok:
+        diag = (f"连通性探测：医院系统不可达（{p.detail}）——当前网络出口疑似被防火墙拦截，"
+                "非账号问题，请换手机流量人工签到。")
+    elif p.channel == "proxy":
+        diag = "连通性探测：医院系统经代理可达（直连疑似被封）——疑似账号侧问题。"
+    else:
+        diag = "连通性探测：医院系统可正常访问——疑似账号侧问题。"
     await notify_user_and_admin(
         f"❌签到失败｜{user.nickname}｜{_period_label(period)}",
         f"{reason}\n已尝试 {attempts} 次，签到窗口即将关闭，请立即人工签到。\n{diag}",
@@ -260,11 +263,11 @@ async def _sign_one(user: models.User, period: str) -> None:
         log.exception("账号签到流程崩溃（已隔离）user=%s", user.account)
 
 
-async def _preflight() -> bool:
-    """赛前探针：医院系统不可达则二次确认后放弃整轮，只推管理员一条。
+async def _preflight(period: str) -> bool:
+    """赛前探针：医院系统不可达则二次确认后放弃整轮。
 
-    被封 IP 时避免 N 人 × 3 次无效重试持续敲门。探测失败 20 秒后复核，
-    防止单次抖动误杀整轮。
+    通知管理员（含诊断详情）+ 广播所有配了 SendKey 的启用用户（精简指引），
+    避免系统故障日出现不知情缺勤。探测失败 20 秒后复核，防止单次抖动误杀整轮。
     """
     first = await probe()
     if first.ok:
@@ -275,9 +278,15 @@ async def _preflight() -> bool:
     if second.ok:
         return True
     log.warning("赛前探测复核仍失败（%s），本轮签到放弃", second.detail)
-    await notify(f"🚨医院系统不可达｜{datetime.now(TZ).strftime('%m-%d')}",
+    label = f"{datetime.now(TZ).strftime('%m-%d')} {PERIOD_NAME[period]}"
+    await notify(f"🚨医院系统不可达｜{label}",
                  f"签到前探测连续失败（{second.detail}），本轮签到未执行。\n"
                  "当前网络出口疑似被医院防火墙拦截，请换手机流量人工签到。")
+    for u in models.list_users():
+        if u.enabled and u.sendkey:
+            await notify(f"🚨自动签到取消｜{label}",
+                         "本轮自动签到因网络问题取消，请在企微自行完成。",
+                         sendkey=u.sendkey)
     return False
 
 
@@ -288,7 +297,7 @@ async def sign_all(period: str) -> None:
     （实测：一人请假被拒，后续账号全部错过签到窗口）。
     """
     log.info("开始 %s 时段签到", period)
-    if not await _preflight():
+    if not await _preflight(period):
         return
     users = [u for u in models.list_users() if u.enabled]
     tasks = []

@@ -220,10 +220,10 @@ def cleanup_logs(days: int = 90) -> int:
 
 # ---------- probe_logs（医院系统可及性探测） ----------
 
-def record_probe(ok: bool, latency_ms: int | None, detail: str) -> None:
+def record_probe(ok: bool, latency_ms: int | None, detail: str, channel: str = "direct") -> None:
     conn().execute(
-        "INSERT INTO probe_logs (ok, latency_ms, detail, created_at) VALUES (?,?,?,?)",
-        (int(ok), latency_ms, detail[:200], now_str()),
+        "INSERT INTO probe_logs (ok, latency_ms, detail, channel, created_at) VALUES (?,?,?,?,?)",
+        (int(ok), latency_ms, detail[:200], channel, now_str()),
     )
     conn().commit()
 
@@ -233,21 +233,31 @@ def latest_probe() -> sqlite3.Row | None:
         "SELECT * FROM probe_logs ORDER BY id DESC LIMIT 1").fetchone()
 
 
-def probe_heatmap(days: int = 14) -> list[dict]:
+def probe_heatmap(days: int = 7) -> list[dict]:
     """近 N 天 × 24 小时可及性网格（登录页热力图用）。
 
-    返回按日期升序的行列表：{date, cells: [True|False|None] × 24}，
-    True=该小时探测全部可达，False=有失败，None=无数据。
+    返回按日期升序的行列表：{date, cells: [str|None] × 24}，
+    格子为 "direct"（直连正常）/ "proxy"（代理正常）/ "fail" / None（无数据）。
+    一小时内多次探测的合并优先级：fail > proxy > direct——异常和代理都值得显眼。
     """
     cutoff = (datetime.now(TZ) - timedelta(days=days - 1)).strftime("%Y-%m-%d")
     rows = conn().execute(
-        "SELECT created_at, ok FROM probe_logs WHERE created_at>=? ORDER BY created_at",
+        "SELECT created_at, ok, channel FROM probe_logs WHERE created_at>=? ORDER BY created_at",
         (cutoff,)).fetchall()
-    grid: dict[str, dict[int, bool]] = {}
+    priority = {"fail": 2, "proxy": 1, "direct": 0}
+
+    def state(row) -> str:
+        if not row["ok"]:
+            return "fail"
+        return row["channel"] if row["channel"] in ("direct", "proxy") else "direct"
+
+    grid: dict[str, dict[int, str]] = {}
     for r in rows:
         date, hour = r["created_at"][:10], int(r["created_at"][11:13])
         cell = grid.setdefault(date, {})
-        cell[hour] = cell.get(hour, True) and bool(r["ok"])
+        s = state(r)
+        if hour not in cell or priority[s] > priority[cell[hour]]:
+            cell[hour] = s
     today = datetime.now(TZ).date()
     return [
         {"date": (d := (today - timedelta(days=i)).strftime("%Y-%m-%d")),

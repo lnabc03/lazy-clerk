@@ -32,41 +32,58 @@ def _cleanup_logs() -> None:
 async def _probe_job() -> None:
     """每小时探测医院系统可及性并落库（登录页热力图数据源）。
 
-    状态翻转时通知管理员：可达→不可达需二次确认（防单次抖动误报）；
-    不可达→恢复即时播报。匿名 GET，频率远低于正常浏览，不增封禁概率。
+    状态机：direct（直连正常）/ proxy（代理逃生中）/ down（不可达），
+    翻转时通知管理员——进入 down 需二次确认防抖动误报；出口在直连与
+    代理间切换也会播报（说明直连疑似被封或已解封）。匿名 GET + 每小时
+    一次，远低于正常浏览量，不增封禁概率。
     """
     from app.core.client import probe
     from app.core.notify import notify
 
     p = await probe()
-    models.record_probe(p.ok, p.latency_ms, p.detail)
-    prev = models.get_setting("probe_last_ok")
+    models.record_probe(p.ok, p.latency_ms, p.detail, p.channel)
+    state = "down" if not p.ok else p.channel
+    prev = models.get_setting("probe_last_state")
 
-    if not p.ok:
-        if prev == "0":
+    if state == "down":
+        if prev == "down":
             return  # 已知不可达，不重复告警
         await asyncio.sleep(20)
         p = await probe()
-        models.record_probe(p.ok, p.latency_ms, p.detail)
+        models.record_probe(p.ok, p.latency_ms, p.detail, p.channel)
         if not p.ok:
-            models.set_setting("probe_last_ok", "0")
+            models.set_setting("probe_last_state", "down")
             await notify("🚨医院系统不可达（定时探测）",
                          f"连续两次探测失败：{p.detail}\n"
-                         "当前网络出口疑似被医院防火墙拦截，签到将自动跳过。")
+                         "直连与代理均不可用，签到将自动跳过，请关注节点状态。")
             return
-    # 可达
-    if prev == "0":
-        await notify("✅医院系统恢复可达", f"探测恢复：{p.detail}（{p.latency_ms}ms）")
-    models.set_setting("probe_last_ok", "1")
+        state = p.channel
+
+    if state == prev:
+        return
+    models.set_setting("probe_last_state", state)
+    if prev == "down":
+        await notify("✅医院系统恢复可达",
+                     f"出口：{'直连' if state == 'direct' else '代理'}，"
+                     f"{p.detail}（{p.latency_ms}ms）")
+    elif prev and prev != state:
+        # direct ↔ proxy 切换：代理逃生启动或直连恢复
+        if state == "proxy":
+            await notify("🔀已切换到代理出口",
+                         "直连疑似被医院防火墙拦截，流量经代理节点出入，"
+                         "签到不受影响。直连恢复后会自动切回。")
+        else:
+            await notify("🔀已恢复直连出口", f"直连恢复可用，{p.detail}（{p.latency_ms}ms）")
 
 
 def start() -> None:
     # 拟人化：触发时间在基准点后 0–5 分钟内随机（jitter 只加不减，见
-    # APScheduler _apply_jitter），即 6:53–6:58、13:53–13:58。
-    # 上限不晚于 :58——签到约花 10 秒，保证 7:00/14:00 医院系统提醒发出前已完成
+    # APScheduler _apply_jitter），即 6:53–6:58、13:00–13:05。
+    # 上午上限不晚于 :58——签到约花 10 秒，保证 7:00 医院系统提醒发出前已完成；
+    # 下午窗口 13:00 开启即签（14:00 提醒前留足缓冲）
     scheduler.add_job(signer.sign_all, CronTrigger(hour=6, minute=53, jitter=300), args=["am"],
                       id="sign_am", name="上午签到")
-    scheduler.add_job(signer.sign_all, CronTrigger(hour=13, minute=53, jitter=300), args=["pm"],
+    scheduler.add_job(signer.sign_all, CronTrigger(hour=13, minute=0, jitter=300), args=["pm"],
                       id="sign_pm", name="下午签到")
     scheduler.add_job(_cleanup_logs, CronTrigger(hour=3, minute=30),
                       id="cleanup", name="日志清理")

@@ -111,7 +111,7 @@ def make_badge(log) -> dict | None:
 
 
 def next_run_text() -> str:
-    """下次执行时间：下一个 6:53 或 13:53（实际触发在其后 0–5 分钟内随机，不晚于 :58）。"""
+    """下次执行时间：下一个 6:53 或 13:00（实际触发在其后 0–5 分钟内随机）。"""
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
 
@@ -119,7 +119,7 @@ def next_run_text() -> str:
 
     now = datetime.now(ZoneInfo(settings.tz))
     for candidate in (now.replace(hour=6, minute=53, second=0, microsecond=0),
-                      now.replace(hour=13, minute=53, second=0, microsecond=0)):
+                      now.replace(hour=13, minute=0, second=0, microsecond=0)):
         if candidate > now:
             return candidate.strftime("约 %Y-%m-%d %H:%M")
     return (now.replace(hour=6, minute=53, second=0, microsecond=0)

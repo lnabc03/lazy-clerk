@@ -163,7 +163,7 @@ def test_retry_capped_at_max_attempts(monkeypatch):
 
 
 def test_sign_all_preflight_aborts_when_unreachable(monkeypatch):
-    """赛前探测连续失败 → 整轮放弃并通知管理员，不触碰任何账号。"""
+    """赛前探测连续失败 → 整轮放弃：管理员收诊断，配了 SendKey 的启用用户收广播。"""
     probes = []
 
     async def fake_probe(timeout=8.0):
@@ -176,16 +176,27 @@ def test_sign_all_preflight_aborts_when_unreachable(monkeypatch):
     pushed = []
 
     async def fake_notify(title, msg, sendkey=None):
-        pushed.append(title)
+        pushed.append((title, sendkey))
 
-    def forbidden_list():
-        raise AssertionError("赛前守卫失败不应进入账号遍历")
-
+    users = [_user(1, "with_key"), _user(2, "no_key"), _user(3, "disabled")]
+    users[0].sendkey = "SCTxxx"      # 启用且有 SendKey → 应收广播
+    users[2].enabled = False          # 停用 → 不收
+    monkeypatch.setattr(models, "list_users", lambda: users)
     monkeypatch.setattr(signer, "probe", fake_probe)
     monkeypatch.setattr(signer.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(signer, "notify", fake_notify)
-    monkeypatch.setattr(models, "list_users", forbidden_list)
 
-    asyncio.run(signer.sign_all("am"))
-    assert len(probes) == 2  # 一次失败 + 一次复核
-    assert pushed and "不可达" in pushed[0]
+    signed = []
+
+    async def fake_sign_one(user, period):
+        signed.append(user.account)
+
+    monkeypatch.setattr(signer, "_sign_one", fake_sign_one)
+
+    asyncio.run(signer.sign_all("pm"))
+    assert len(probes) == 2                    # 一次失败 + 一次复核
+    assert not signed                          # 未进入账号签到
+    admin_alerts = [t for t, k in pushed if "不可达" in t and k is None]
+    broadcasts = [(t, k) for t, k in pushed if "自动签到取消" in t]
+    assert len(admin_alerts) == 1
+    assert len(broadcasts) == 1 and broadcasts[0][1] == "SCTxxx"  # 仅启用且有 key 的用户

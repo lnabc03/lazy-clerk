@@ -1,0 +1,40 @@
+# mihomo 配置模板：订阅链接与 API 密钥在容器启动时从 .env 注入（见 docker-compose.yml）。
+# 分流策略：仅医院域名走 hospital 组（直连优先，被封自动切最快节点），其余全部直连。
+mixed-port: 7890
+allow-lan: false
+log-level: warning
+external-controller: 0.0.0.0:9090   # 容器内监听；宿主只映射 127.0.0.1，且有 secret
+secret: __SECRET__
+
+proxy-providers:
+  sub:
+    type: http
+    url: "__SUB_URL__"
+    interval: 86400                  # 订阅每天刷新
+    health-check:
+      enable: true
+      url: http://my.gzsums.net:1118/
+      expected-status: "200,302"
+      interval: 300
+
+proxy-groups:
+  # 自动选速：按医院 SSO 实测延迟挑最快节点（不是通用测速，避免选了快但到不了医院的）
+  - name: hospital-auto
+    type: url-test
+    use: [sub]
+    url: http://my.gzsums.net:1118/
+    expected-status: "200,302"
+    interval: 300
+    tolerance: 100
+
+  # 直连优先：直连健康检查失败（被封）→ 自动跌到最快节点；直连恢复 → 自动切回
+  - name: hospital
+    type: fallback
+    proxies: [DIRECT, hospital-auto]
+    url: http://my.gzsums.net:1118/
+    expected-status: "200,302"
+    interval: 300
+
+rules:
+  - DOMAIN-SUFFIX,my.gzsums.net,hospital
+  - MATCH,DIRECT

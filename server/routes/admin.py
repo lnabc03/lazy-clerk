@@ -48,6 +48,7 @@ async def admin_logout(request: Request):
 async def admin_page(request: Request, msg: str = "", error: str = ""):
     if not is_admin(request):
         return redirect("/admin/login")
+    from app.core.client import mihomo_group
     today = models.today_results()
     invite_by_user = models.invite_of_users()
     users = [{
@@ -65,7 +66,22 @@ async def admin_page(request: Request, msg: str = "", error: str = ""):
                   admin_sendkey_masked=mask_sendkey(admin_sendkey),
                   heatmap=models.probe_heatmap(days=7),
                   probe_latest=models.latest_probe(),
-                  probe_url="/admin/probe")
+                  probe_url="/admin/probe",
+                  proxy_configured=bool(settings.mihomo_api),
+                  proxy_info=await mihomo_group() if settings.mihomo_api else None)
+
+
+@router.post("/proxy/switch")
+async def proxy_switch(request: Request, target: str = Form(...)):
+    """切换代理出口：DIRECT 恢复直连优先，hospital-auto 强制自动选速，节点名手动指定。"""
+    if not is_admin(request):
+        return redirect("/admin/login")
+    from app.core.client import mihomo_switch
+    label = {"DIRECT": "直连优先", f"{settings.proxy_group}-auto": "自动选速"}.get(target, target)
+    err = await mihomo_switch(target)
+    if err:
+        return redirect("/admin", error=f"切换失败：{err}")
+    return redirect("/admin", msg=f"出口已切换：{label}")
 
 
 @router.post("/users/{user_id}/toggle")
@@ -112,9 +128,10 @@ async def probe_now(request: Request):
         return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
     from app.core.client import probe
     p = await probe()
-    models.record_probe(p.ok, p.latency_ms, p.detail)
+    models.record_probe(p.ok, p.latency_ms, p.detail, p.channel)
     status = "✅ 可达" if p.ok else "❌ 不可达"
-    return {"ok": True, "msg": f"{status}：{p.detail}（{p.latency_ms}ms）"}
+    via = "（代理出口）" if p.ok and p.channel == "proxy" else ""
+    return {"ok": True, "msg": f"{status}：{p.detail}（{p.latency_ms}ms）{via}"}
 
 
 @router.post("/check-all")

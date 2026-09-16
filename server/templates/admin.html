@@ -74,6 +74,47 @@
 
 {% include "_probe_heatmap.html" %}
 
+<div class="card shadow-sm mb-3">
+    <div class="card-body">
+        <h6 class="card-title">代理出口（mihomo）</h6>
+        {% if not proxy_configured %}
+        <p class="small text-muted mb-0">
+            未启用。医院封服务器 IP 时，按 server/README「IP 被封：启用代理逃生通道」
+            在 .env 配置订阅后以 <code>--profile proxy</code> 启动。
+        </p>
+        {% elif not proxy_info %}
+        <p class="small text-danger mb-0">
+            已配置但 mihomo API 不可达——sidecar 容器未启动？（需 <code>docker compose --profile proxy up -d</code>）
+        </p>
+        {% else %}
+        <p class="small mb-2">
+            当前出口：
+            {% if proxy_info.now == "DIRECT" %}
+            <span class="badge bg-success">直连（服务器 IP）</span>
+            {% else %}
+            <span class="badge bg-primary">代理：{{ proxy_info.now }}</span>
+            {% endif %}
+            <span class="text-muted ms-1">平时无需干预，直连被封会自动切最快节点，恢复自动切回。</span>
+        </p>
+        <form method="post" action="/admin/proxy/switch" class="d-flex gap-2 flex-wrap align-items-center">
+            <select name="target" class="form-select form-select-sm w-auto">
+                <option value="DIRECT">直连优先（默认）</option>
+                <option value="hospital-auto">强制代理 · 自动选速</option>
+                {% for n in proxy_info.nodes %}
+                <option value="{{ n.name }}">
+                    {{ n.name }}{{ (' · ' ~ n.delay ~ 'ms') if n.delay else ' · 超时' }}
+                </option>
+                {% endfor %}
+            </select>
+            <button class="btn btn-outline-primary btn-sm text-nowrap">切换</button>
+        </form>
+        <p class="small text-muted mt-2 mb-0">
+            手动指定节点在下次测速（约 5 分钟）后可能被自动选速覆盖，适合「当前节点不通先换一个顶着」。
+        </p>
+        {% endif %}
+    </div>
+</div>
+
 <div class="card shadow-sm">
     <div class="card-body">
         <div class="d-flex justify-content-between align-items-center mb-2">

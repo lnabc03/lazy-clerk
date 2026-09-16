@@ -15,12 +15,14 @@ def _default_data_dir() -> str:
 
 
 def _load_dotenv() -> None:
-    """极简 .env 加载（不引入 python-dotenv 依赖），已存在的环境变量优先。
+    """极简 .env 加载（不引入 python-dotenv 依赖）。
 
-    候选位置：server/.env（公网版部署约定）→ 项目根 .env（本地开发）。
+    合并两个文件：根 .env（本地开发）打底，server/.env（公网版部署约定）
+    覆盖同名键；真实环境变量优先级最高。
     """
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for path in (os.path.join(root, "server", ".env"), os.path.join(root, ".env")):
+    merged: dict[str, str] = {}
+    for path in (os.path.join(root, ".env"), os.path.join(root, "server", ".env")):
         if not os.path.exists(path):
             continue
         with open(path, encoding="utf-8") as f:
@@ -30,9 +32,10 @@ def _load_dotenv() -> None:
                     continue
                 key, _, value = line.partition("=")
                 key, value = key.strip(), value.strip()
-                if key and key not in os.environ:
-                    os.environ[key] = value
-        return
+                if key:
+                    merged[key] = value
+    for key, value in merged.items():
+        os.environ.setdefault(key, value)
 
 
 _load_dotenv()
@@ -48,6 +51,12 @@ class Settings:
     )
     tz: str = field(default_factory=lambda: os.environ.get("TZ", "Asia/Shanghai"))
     data_dir: str = field(default_factory=lambda: os.environ.get("DATA_DIR") or _default_data_dir())
+    # 代理逃生通道（仅公网版配 mihomo sidecar 时使用）：空 = 直连
+    proxy_url: str = field(default_factory=lambda: os.environ.get("PROXY_URL", ""))
+    # mihomo API：探针用它查当前出口（直连/节点），热力图据此分色
+    mihomo_api: str = field(default_factory=lambda: os.environ.get("MIHOMO_API", ""))
+    mihomo_secret: str = field(default_factory=lambda: os.environ.get("MIHOMO_SECRET", ""))
+    proxy_group: str = field(default_factory=lambda: os.environ.get("PROXY_GROUP", "hospital"))
 
     @property
     def db_path(self) -> str:

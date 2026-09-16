@@ -9,3 +9,25 @@ services:
       - ./data:/app/data
     env_file: .env
     restart: unless-stopped
+
+  # 代理逃生通道：医院封服务器 IP 时启用（.env 配好 PROXY_* 后
+  # `docker compose --profile proxy up -d`）。直连优先，被封自动切最快节点。
+  mihomo:
+    profiles: ["proxy"]
+    image: metacubex/mihomo:latest
+    env_file: .env
+    volumes:
+      - ./mihomo/config.template.yaml:/template.yaml:ro
+      - mihomo-cache:/root/.config/mihomo
+    # 启动时把订阅链接/API 密钥注入配置模板（模板入库，敏感值只在 .env）
+    command: >
+      sh -c "sed -e \"s|__SUB_URL__|$${PROXY_SUB_URL}|g\"
+                 -e \"s|__SECRET__|$${MIHOMO_SECRET}|g\"
+                 /template.yaml > /root/.config/mihomo/config.yaml
+             && exec mihomo -d /root/.config/mihomo"
+    ports:
+      - "127.0.0.1:9090:9090"   # 节点管理 API，仅本机（配 secret）
+    restart: unless-stopped
+
+volumes:
+  mihomo-cache:

@@ -21,7 +21,7 @@ from personal.config import LOG_PATH, load, wizard  # noqa: E402
 notify.set_admin_key_resolver(None)
 
 TASK_NAMES = {"am": "lazy-clerk-sign-am", "pm": "lazy-clerk-sign-pm"}
-TASK_TIMES = {"am": "06:58", "pm": "13:58"}
+TASK_TIMES = {"am": "06:58", "pm": "13:00"}
 
 RESULT_TEXT = {
     "success": "签到成功", "skipped": "已经签过", "no_schedule": "今日此时段无需签到",
@@ -66,9 +66,16 @@ def make_user() -> User:
 
 # ---------- 核心动作 ----------
 
-async def cmd_sign() -> int:
+async def cmd_sign(period: str | None = None, jitter: bool = False) -> int:
     user = make_user()
-    period = signer.current_period()
+    period = period or signer.current_period()
+    if jitter:
+        # 计划任务触发时的拟人化延迟 0–5 分钟（13:00 基准 → 13:00–13:05）；
+        # 交互菜单的"立即签到"不带此延迟
+        import random
+        delay = random.uniform(0, 300)
+        print(f"随机延迟 {delay:.0f} 秒后开始签到...")
+        await asyncio.sleep(delay)
     print(f"开始{signer.PERIOD_NAME[period]}签到，失败时每 5 分钟自动重试。")
     outcome = await signer.sign_user_with_retry(user, period, log_fn=file_log)
     # 用户主动触发的签到无论结果如何都推送，兼作微信推送的连通性确认
@@ -113,14 +120,14 @@ def cmd_install() -> int:
             print(f"计划任务 {name} 已存在且指向其他程序：{conflict}")
             print("这台电脑可能装过另一形态，请先卸载旧的再开启。")
             return 1
-        err = wintasks.create_daily(name, TASK_TIMES[period], "sign",
+        err = wintasks.create_daily(name, TASK_TIMES[period], f"sign {period} --jitter",
                                     os.path.abspath(__file__))
         if err:
             print(f"注册计划任务失败：{err}")
             return 1
         if not wintasks.enable_wakeup(name):
             print("睡眠唤醒开启失败（不影响锁屏签到），电脑睡眠时可能错过签到。")
-    print("自动签到已开启，每天 6:58 和 13:58 准时执行。")
+    print("自动签到已开启，每天 6:58 准时、13:00–13:05 随机执行。")
     print("锁屏不影响签到；电脑插电时睡眠会自动唤醒执行。")
     print("错过时医院会在 7:00 和 14:00 提醒你。")
     return 0
@@ -155,7 +162,7 @@ async def interactive() -> int:
         print("=" * 46)
         print("\n第一次使用，先花半分钟完成配置：\n")
         await wizard()
-        answer = input("\n现在开启每天 6:58 / 13:58 的自动签到吗？[Y/n] ").strip().lower()
+        answer = input("\n现在开启每天 6:58 / 13:00 的自动签到吗？[Y/n] ").strip().lower()
         if answer in ("", "y", "yes"):
             cmd_install()
         print("\n都设置好了，祝你拥有美好的一天~")
@@ -169,7 +176,7 @@ async def interactive() -> int:
     await cmd_status()
     n_tasks = tasks_installed()
     if n_tasks == 2:
-        print("\n自动签到：已开启（每天 6:58 / 13:58）")
+        print("\n自动签到：已开启（每天 6:58 / 13:00–13:05 随机）")
     elif n_tasks == 1:
         print("\n自动签到：异常，只注册了一个时段，建议重新开启")
     else:
@@ -214,7 +221,7 @@ USAGE = """lazy-clerk 个人版
 用法：
   lazy-clerk.exe            打开交互界面
   lazy-clerk.exe setup      配置账号密码
-  lazy-clerk.exe sign       立即签到
+  lazy-clerk.exe sign       立即签到（计划任务以 sign am|pm --jitter 调用，带随机延迟）
   lazy-clerk.exe status     查询今日考勤
   lazy-clerk.exe install    开启每天自动签到
   lazy-clerk.exe uninstall  关闭自动签到
@@ -229,7 +236,9 @@ def main() -> int:
         asyncio.run(wizard())
         return 0
     if cmd == "sign":
-        return asyncio.run(cmd_sign())
+        args = [a.lower() for a in sys.argv[2:]]
+        period = next((a for a in args if a in ("am", "pm")), None)
+        return asyncio.run(cmd_sign(period, jitter="--jitter" in args))
     if cmd == "status":
         return asyncio.run(cmd_status())
     if cmd == "install":

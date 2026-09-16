@@ -215,7 +215,7 @@ async def probe_now(request: Request):
         return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
     from app.core.client import probe
     p = await probe()
-    models.record_probe(p.ok, p.latency_ms, p.detail)
+    models.record_probe(p.ok, p.latency_ms, p.detail, p.channel)
     status = "✅ 可达" if p.ok else "❌ 不可达"
     return JSONResponse({"ok": True, "msg": f"{status}：{p.detail}（{p.latency_ms}ms）"})
 
