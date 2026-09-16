@@ -24,7 +24,8 @@
 - 代理逃生通道（可选）：医院封服务器 IP 时，mihomo sidecar 直连优先、被封自动切
   订阅里最快节点、恢复自动切回；热力图蓝格标记代理时段，出口切换推送管理员
 - 签到结果微信推送：成功推本人，请假/失败/需人工分别按场景推本人或管理员+本人
-- 登录防爆破限流（用户/管理员入口独立计数）
+- 登录防爆破限流（用户/管理员入口独立计数）；注册与改密接口每次提交都会向医院
+  SSO 真实认证，限流收得更紧（1 分钟 3 次锁 30 分钟），防被当 SSO 放大器连累服务器 IP
 
 ## 安装（首次部署）
 
@@ -90,7 +91,7 @@ docker compose exec lazy-clerk python server/scripts/smoke.py --stage S5 --sendk
 | --- | --- |
 | 看日志 | `docker compose logs -f --tail 100` |
 | 重启 | `docker compose restart` |
-| 升级（压缩包方式） | 解压新包覆盖代码（包内不含 `.env` 与 `data/`，覆盖安全）→ `docker compose up -d --build`（启用了代理则用 `docker compose --profile proxy up -d --build`） |
+| 升级（压缩包方式） | 解压新包覆盖代码（包内不含 `.env` 与 `data/`，覆盖安全）→ `docker compose up -d --build` |
 | 进容器排查 | `docker compose exec lazy-clerk bash` |
 | 代理节点管理 | `server/scripts/node.sh list / use <节点名> / direct` |
 
@@ -104,9 +105,12 @@ docker compose exec lazy-clerk python server/scripts/smoke.py --stage S5 --sendk
 
 ```bash
 cd server
-# .env 追加四行（见 .env.example 注释）：PROXY_SUB_URL / MIHOMO_SECRET / PROXY_URL / MIHOMO_API
-docker compose --profile proxy up -d
+# .env 取消注释代理段五行并填好值（见 .env.example 注释）
+docker compose up -d
 ```
+
+代理段里的 `COMPOSE_PROFILES=proxy` 会让 compose 自动带上 mihomo sidecar——
+此后的 `up` / `restart` / 升级命令都无需任何额外参数。
 
 之后管理页热力图会出现蓝格（代理正常），出口切换时管理员会收到 🔀 推送；
 管理页「代理出口」卡片可随时查看当前出口、各节点实测延迟并手动切换

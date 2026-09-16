@@ -269,12 +269,12 @@ async def _preflight(period: str) -> bool:
     通知管理员（含诊断详情）+ 广播所有配了 SendKey 的启用用户（精简指引），
     避免系统故障日出现不知情缺勤。探测失败 20 秒后复核，防止单次抖动误杀整轮。
     """
-    first = await probe()
+    first = await probe(switch_on_fail=False)  # 首探不逃生：直连秒级抖动不该切代理
     if first.ok:
         return True
     log.warning("赛前探测失败（%s），20 秒后复核", first.detail)
     await asyncio.sleep(20)
-    second = await probe()
+    second = await probe()  # 复核允许切代理逃生：直连真被封则走代理完成本轮
     if second.ok:
         return True
     log.warning("赛前探测复核仍失败（%s），本轮签到放弃", second.detail)

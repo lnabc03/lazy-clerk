@@ -10,8 +10,9 @@ services:
     env_file: .env
     restart: unless-stopped
 
-  # 代理逃生通道：医院封服务器 IP 时启用（.env 配好 PROXY_* 后
-  # `docker compose --profile proxy up -d`）。直连优先，被封自动切最快节点。
+  # 代理逃生通道：医院封服务器 IP 时启用。.env 里取消注释代理段五行
+  # （含 COMPOSE_PROFILES=proxy）后，随 `docker compose up -d` 自动启动。
+  # 直连优先，被封自动切最快节点。
   mihomo:
     profiles: ["proxy"]
     image: metacubex/mihomo:latest

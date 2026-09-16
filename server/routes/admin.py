@@ -67,7 +67,7 @@ async def admin_page(request: Request, msg: str = "", error: str = ""):
                   heatmap=models.probe_heatmap(days=7),
                   probe_latest=models.latest_probe(),
                   probe_url="/admin/probe",
-                  proxy_configured=bool(settings.mihomo_api),
+                  proxy_configured=bool(settings.proxy_url),
                   proxy_info=await mihomo_group() if settings.mihomo_api else None)
 
 
@@ -136,16 +136,27 @@ async def probe_now(request: Request):
 
 @router.post("/check-all")
 async def check_all(request: Request):
-    """签到状态检测：逐一登录医院系统，刷新所有启用账号的当日真实状态。"""
+    """签到状态检测：登录医院系统，刷新所有启用账号的当日真实状态。
+
+    账号并行（带 0.5–2 秒/位小错峰）——串行逐个登录在账号多时会挂起几十秒。
+    """
+    import asyncio
+    import logging
+    import random
+
     if not is_admin(request):
         return redirect("/admin/login")
     users = [u for u in models.list_users() if u.enabled]
-    for u in users:
+
+    async def _check(u, delay: float) -> None:
+        await asyncio.sleep(delay)
         try:
             await signer.check_user_status(u)
         except Exception:
-            import logging
             logging.getLogger("lazy-clerk.admin").exception("状态检测失败 user=%s", u.account)
+
+    await asyncio.gather(*(_check(u, i * random.uniform(0.5, 2.0))
+                           for i, u in enumerate(users)))
     return redirect("/admin", msg=f"已检测 {len(users)} 个启用账号，结果见总览表")
 
 

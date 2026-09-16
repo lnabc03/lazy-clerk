@@ -37,7 +37,6 @@
             {% endfor %}
         </div>
         <p class="probe-legend mb-0">
-            近 7 天 × 24 小时，每小时自动探测。
             <span class="probe-cell ok"></span> 直连正常
             <span class="probe-cell proxy"></span> 代理正常
             <span class="probe-cell fail"></span> 不可达
@@ -54,7 +53,7 @@ async function probeNow(url) {
     const r = await fetch(url, {method: "POST"});
     const d = await r.json();
     alert(d.msg);
-    if (d.ok) location.reload();
+    location.reload();  // 刷新热力图与状态徽标，无论成败都落库了
 }
 </script>
 {% endif %}

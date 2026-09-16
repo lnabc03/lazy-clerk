@@ -78,14 +78,9 @@
     <div class="card-body">
         <h6 class="card-title">代理出口（mihomo）</h6>
         {% if not proxy_configured %}
-        <p class="small text-muted mb-0">
-            未启用。医院封服务器 IP 时，按 server/README「IP 被封：启用代理逃生通道」
-            在 .env 配置订阅后以 <code>--profile proxy</code> 启动。
-        </p>
+        <p class="small text-muted mb-0">未启用。医院封服务器 IP 时，按 .env.example 代理段配置后重启容器即可。</p>
         {% elif not proxy_info %}
-        <p class="small text-danger mb-0">
-            已配置但 mihomo API 不可达——sidecar 容器未启动？（需 <code>docker compose --profile proxy up -d</code>）
-        </p>
+        <p class="small text-danger mb-0">已配置但 mihomo API 不可达——sidecar 容器未启动？</p>
         {% else %}
         <p class="small mb-2">
             当前出口：

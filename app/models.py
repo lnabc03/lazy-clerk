@@ -89,15 +89,6 @@ def update_password(user_id: int, password: str) -> None:
 
 # ---------- invite_codes ----------
 
-def add_invite_hashes(hashes: list[str]) -> int:
-    """插入邀请码哈希（仅旧脚本兼容路径），返回实际新增数量（重复忽略）。"""
-    cur = conn().executemany(
-        "INSERT OR IGNORE INTO invite_codes (code_hash) VALUES (?)", [(h,) for h in hashes]
-    )
-    conn().commit()
-    return cur.rowcount
-
-
 def generate_invite() -> str:
     """生成 1 个邀请码：明文+哈希入库，返回明文。未使用的明文管理页常驻可见。"""
     import secrets
@@ -160,13 +151,6 @@ def use_invite(code: str, user_id: int) -> bool:
     )
     conn().commit()
     return True
-
-
-def invite_remaining() -> int:
-    row = conn().execute(
-        "SELECT COUNT(*) AS c FROM invite_codes WHERE used_by IS NULL"
-    ).fetchone()
-    return row["c"]
 
 
 # ---------- sign_logs ----------
@@ -238,13 +222,12 @@ def probe_heatmap(days: int = 7) -> list[dict]:
 
     返回按日期升序的行列表：{date, cells: [str|None] × 24}，
     格子为 "direct"（直连正常）/ "proxy"（代理正常）/ "fail" / None（无数据）。
-    一小时内多次探测的合并优先级：fail > proxy > direct——异常和代理都值得显眼。
+    一小时内多次探测取最新一条——手动检测后热力图立即反映当前真实状态。
     """
     cutoff = (datetime.now(TZ) - timedelta(days=days - 1)).strftime("%Y-%m-%d")
     rows = conn().execute(
         "SELECT created_at, ok, channel FROM probe_logs WHERE created_at>=? ORDER BY created_at",
         (cutoff,)).fetchall()
-    priority = {"fail": 2, "proxy": 1, "direct": 0}
 
     def state(row) -> str:
         if not row["ok"]:
@@ -252,12 +235,9 @@ def probe_heatmap(days: int = 7) -> list[dict]:
         return row["channel"] if row["channel"] in ("direct", "proxy") else "direct"
 
     grid: dict[str, dict[int, str]] = {}
-    for r in rows:
+    for r in rows:  # 按时间升序，后到者覆盖，小时内最新一条生效
         date, hour = r["created_at"][:10], int(r["created_at"][11:13])
-        cell = grid.setdefault(date, {})
-        s = state(r)
-        if hour not in cell or priority[s] > priority[cell[hour]]:
-            cell[hour] = s
+        grid.setdefault(date, {})[hour] = state(r)
     today = datetime.now(TZ).date()
     return [
         {"date": (d := (today - timedelta(days=i)).strftime("%Y-%m-%d")),

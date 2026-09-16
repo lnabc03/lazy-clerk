@@ -60,6 +60,12 @@ async def change_password(request: Request, account: str = Form(...),
     """
     from app.core.client import verify_account
 
+    # 本接口会对医院 SSO 发起真实认证：限流在一切校验之前，防被当 SSO 放大器
+    ip = request.client.host if request.client else "unknown"
+    locked = login_locked(ip, scope="sso")
+    if locked:
+        return redirect("/login", error=f"操作过于频繁，请 {locked // 60 + 1} 分钟后再试")
+    record_login_failure(ip, scope="sso")
     account = account.strip()
     if len(password) < 4 or password != password2:
         return redirect("/login", error="密码过短或两次输入不一致")

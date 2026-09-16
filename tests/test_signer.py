@@ -12,7 +12,7 @@ def _row(status=None, day_off=0, date="2026-09-11", time_name="上午", rid=1):
             "SignInStatus": status, "DayOff": day_off}
 
 
-async def _ok_probe(timeout=8.0):
+async def _ok_probe(timeout=8.0, switch_on_fail=True):
     return ProbeResult(True, "HTTP 200", 10)
 
 
@@ -166,7 +166,7 @@ def test_sign_all_preflight_aborts_when_unreachable(monkeypatch):
     """赛前探测连续失败 → 整轮放弃：管理员收诊断，配了 SendKey 的启用用户收广播。"""
     probes = []
 
-    async def fake_probe(timeout=8.0):
+    async def fake_probe(timeout=8.0, switch_on_fail=True):
         probes.append(1)
         return ProbeResult(False, "连接超时（疑似被防火墙拦截）", 8000)
 

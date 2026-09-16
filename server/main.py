@@ -40,6 +40,8 @@ async def startup() -> None:
     db.init()
     # 管理员密码：首次启动哈希入库，此后仅校验（改密码在管理页"管理员设置"）
     if settings.admin_password and not models.get_setting("admin_password_hash"):
+        if len(settings.admin_password) < 12:
+            log.warning("ADMIN_PASSWORD 少于 12 位，建议加强（README 要求 ≥12 位）")
         models.set_setting("admin_password_hash", models.sha256(settings.admin_password))
         log.info("管理员密码已哈希入库")
     if not settings.admin_password:

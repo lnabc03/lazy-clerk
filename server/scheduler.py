@@ -27,6 +27,9 @@ def _cleanup_logs() -> None:
     deleted = models.cleanup_probes(days=40)
     if deleted:
         log.info("清理 40 天前探测记录 %d 条", deleted)
+    deleted = models.cleanup_dead_invites()
+    if deleted:
+        log.info("清理死邀请码 %d 个", deleted)
 
 
 async def _probe_job() -> None:
@@ -40,7 +43,7 @@ async def _probe_job() -> None:
     from app.core.client import probe
     from app.core.notify import notify
 
-    p = await probe()
+    p = await probe(switch_on_fail=False)  # 首探不逃生：直连秒级抖动不该触发切代理
     models.record_probe(p.ok, p.latency_ms, p.detail, p.channel)
     state = "down" if not p.ok else p.channel
     prev = models.get_setting("probe_last_state")
@@ -49,7 +52,7 @@ async def _probe_job() -> None:
         if prev == "down":
             return  # 已知不可达，不重复告警
         await asyncio.sleep(20)
-        p = await probe()
+        p = await probe()  # 复核允许切代理逃生：直连真被封则走代理并标蓝
         models.record_probe(p.ok, p.latency_ms, p.detail, p.channel)
         if not p.ok:
             models.set_setting("probe_last_state", "down")

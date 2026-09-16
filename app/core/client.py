@@ -129,15 +129,15 @@ async def mihomo_switch(target: str) -> str | None:
         return f"API 不可达: {type(e).__name__}"
 
 
-async def probe(timeout: float = 8.0) -> ProbeResult:
-    """连通性探针：匿名 GET SSO 首页，出口与签到链路完全一致。
+async def _probe_once(timeout: float) -> ProbeResult:
+    """单次探测：经当前出口（mihomo 选定的直连或节点）匿名 GET SSO 首页。
 
     不登录、不带任何凭据，与浏览器打开登录页完全同构——封禁的触发面在
     认证接口的频次/失败率，分钟级以下的匿名 GET 不会增加封禁概率。
     """
     start = time.monotonic()
     latency = lambda: int((time.monotonic() - start) * 1000)  # noqa: E731
-    channel, ok, detail = "direct", False, ""
+    ok, detail = False, ""
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True,
                                      headers={"User-Agent": UA},
@@ -157,9 +157,35 @@ async def probe(timeout: float = 8.0) -> ProbeResult:
         detail = f"连接失败: {type(e).__name__}"
     except httpx.HTTPError as e:
         detail = f"网络错误: {type(e).__name__}"
-    if ok:
-        channel = await current_channel()
-    return ProbeResult(ok, detail, latency(), channel)
+    return ProbeResult(ok, detail, latency())
+
+
+async def probe(timeout: float = 8.0, switch_on_fail: bool = True) -> ProbeResult:
+    """连通性探针：先按当前出口探测，直连出口失败且配了代理时立即切代理复核
+    ——代理也失败才判不可达（标红）。
+
+    「直连优先、被封走最快节点」的选路由 mihomo fallback/url-test 组执行，
+    但其健康检查有最长 5 分钟滞后；这里在直连失败时主动切组复核，
+    让探测与赛前守卫实时反映「代理其实可用」，避免窗口期误报红色/放弃整轮。
+    mihomo 自身的健康检查会在直连恢复后自动切回，无需回切。
+
+    switch_on_fail=False：只试当前出口、不做逃生切换。定时探测与赛前守卫的
+    首次探测用它——直连的秒级抖动不应触发出口切换和 🔀 误报，复核（20 秒后）
+    仍失败才允许逃生。手动「立即检测」保持默认 True（用户要即时答案）。
+    """
+    result = await _probe_once(timeout)
+    if result.ok:
+        result.channel = await current_channel()
+        return result
+    if not (switch_on_fail and settings.proxy_url and settings.mihomo_api):
+        return result  # 不允许切换，或无代理可逃生：直连失败即不可达
+    if await current_channel() != "direct":
+        return result  # 已在代理出口上失败：代理不行，判不可达
+    if await mihomo_switch(f"{settings.proxy_group}-auto"):
+        return result  # 切换失败（API 异常等），按直连失败上报
+    retry = await _probe_once(timeout)
+    retry.channel = "proxy"
+    return retry
 
 
 _probe_cache: tuple[float, ProbeResult] | None = None

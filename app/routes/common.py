@@ -40,12 +40,18 @@ def is_admin(request: Request) -> bool:
     return bool(request.session.get("admin"))
 
 
-# ---------- 登录防爆破限流：同一 IP 1 分钟内失败 5 次锁 10 分钟（内存计数） ----------
-# scope 区分入口（用户登录 / 管理员登录），互不影响
+# ---------- 防爆破/防放大限流（内存计数） ----------
+# scope 区分入口，互不影响：
+#   user/admin：登录爆破——1 分钟失败 5 次锁 10 分钟
+#   sso：注册/更正密码——每次提交都会向医院 SSO 发起真实认证，匿名滥用等于
+#        让服务器 IP 替攻击者背封禁画像（2026-09 封禁事故的同一触发面），
+#        收得更紧：1 分钟 3 次锁 30 分钟，且无论成败都计数
 
-_FAIL_WINDOW = 60
-_FAIL_LIMIT = 5
-_LOCK_SECONDS = 600
+_SCOPE_PARAMS = {  # scope: (计数窗口秒, 窗口内上限, 锁定时长秒)
+    "user": (60, 5, 600),
+    "admin": (60, 5, 600),
+    "sso": (60, 3, 1800),
+}
 
 _failures: dict[str, list[float]] = {}
 _locked_until: dict[str, float] = {}
@@ -59,12 +65,13 @@ def login_locked(ip: str, scope: str = "user") -> int:
 
 def record_login_failure(ip: str, scope: str = "user") -> None:
     key = f"{scope}:{ip}"
+    window, limit, lock_seconds = _SCOPE_PARAMS[scope]
     now = time.time()
-    fails = [t for t in _failures.get(key, []) if now - t < _FAIL_WINDOW]
+    fails = [t for t in _failures.get(key, []) if now - t < window]
     fails.append(now)
     _failures[key] = fails
-    if len(fails) >= _FAIL_LIMIT:
-        _locked_until[key] = now + _LOCK_SECONDS
+    if len(fails) >= limit:
+        _locked_until[key] = now + lock_seconds
         _failures.pop(key, None)
 
 

@@ -9,7 +9,8 @@ from fastapi import APIRouter, Form, Request
 
 from app import models
 from app.core.client import verify_account
-from app.routes.common import redirect, render
+from app.routes.common import (login_locked, record_login_failure, redirect,
+                               render)
 
 router = APIRouter()
 
@@ -29,6 +30,12 @@ async def register_submit(
     sendkey: str = Form(""),
 ):
     nickname, account = nickname.strip(), account.strip()
+    # 本接口会对医院 SSO 发起真实认证：限流在一切校验之前，防被当 SSO 放大器
+    ip = request.client.host if request.client else "unknown"
+    locked = login_locked(ip, scope="sso")
+    if locked:
+        return redirect("/register", error=f"操作过于频繁，请 {locked // 60 + 1} 分钟后再试")
+    record_login_failure(ip, scope="sso")
     if not all([nickname, account, password, invite_code.strip()]):
         return redirect("/register", error="昵称、账号、密码、邀请码均为必填")
     if len(password) < 4:
