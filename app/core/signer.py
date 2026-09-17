@@ -320,10 +320,12 @@ def current_period() -> str:
     return "am" if datetime.now(TZ).hour < 12 else "pm"
 
 
-async def check_user_status(user: models.User) -> None:
+async def check_user_status(user: models.User) -> bool:
     """管理页"签到状态检测"：登录医院系统拉取当日真实状态，写入 checked 日志。
 
-    不执行签到、不推送，只刷新状态总览。失败隔离由调用方保证。
+    不执行签到、不推送，只刷新状态总览。返回是否真正取回状态——登录/拉取
+    失败会写 failed 日志并返回 False，供调用方如实统计（HTTP 请求本身
+    永远"成功"，不能作为检测成功的口径）。失败隔离由调用方保证。
     """
     today = datetime.now(TZ).strftime("%Y-%m-%d")
     try:
@@ -333,11 +335,11 @@ async def check_user_status(user: models.User) -> None:
     except AuthError as e:
         models.add_log(user.id, today, current_period(), RESULT_FAILED,
                        f"[检测] 登录失败: {e}")
-        return
+        return False
     except Exception as e:
         models.add_log(user.id, today, current_period(), RESULT_FAILED,
                        f"[检测] {type(e).__name__}: {e}")
-        return
+        return False
 
     for period in ("am", "pm"):
         row = find_target_row(rows, today, period)
@@ -351,3 +353,4 @@ async def check_user_status(user: models.User) -> None:
             if int(row.get("DayOff") or 0) > 0:
                 msg += "（补签场景）"
         models.add_log(user.id, today, period, RESULT_CHECKED, f"[检测] {msg}")
+    return True

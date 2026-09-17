@@ -13,31 +13,31 @@ proxy-providers:
     type: http
     url: "__SUB_URL__"
     interval: 3600                   # 订阅每小时刷新：节点池变化（上下线/换 IP）及时跟进
+    # 中立 204 测速（所有代理客户端的默认行为）。历史教训：曾用医院首页做
+    # 全节点健康检查（98 节点 × 每 5 分钟 ≈ 2.8 万次/天），对医院 WAF 形同
+    # 扫描器、对机场形同滥用，疑为出口被批量拉黑/账号被限流的自伤来源
+    # （2026-09-17 排查定论，见 KNOWN_ISSUES.md）。医院可达性由 app 低频实测把关。
     health-check:
       enable: true
-      url: http://my.gzsums.net:1118/
-      expected-status: "200,302"
-      interval: 300
+      url: http://www.gstatic.com/generate_204
+      expected-status: "204"
+      interval: 600
 
 proxy-groups:
-  # 自动选速：按医院 SSO 实测延迟挑最快节点（不是通用测速，避免选了快但到不了医院的）
-  # exclude-filter 剔除订阅里混入的套餐信息类假节点；tolerance 300 防止
-  # 测速噪声导致节点反复横跳（家宽节点逐次测速摆动可达数倍）
-  - name: hospital-auto
-    type: url-test
+  # 钉节点组（流量承接者）：app 按医院实测钉住一个节点，select 不自主切换——
+  # 好节点一直用，只在实测失败时由 app 重选（手动钉 IEPL 的同款用法）。
+  # 历史教训：url-test 每 5 分钟单样本重选 = 每 5 分钟把流量交给一个陌生出口
+  # （实测签到检测中途节点被换掉），且单样本测速抓不住节点分钟级坏相。
+  - name: hospital-pin
+    type: select
     use: [sub]
     exclude-filter: "剩余流量|套餐|到期|官网|客服"
-    url: http://my.gzsums.net:1118/
-    expected-status: "200,302"
-    interval: 300
-    tolerance: 300
 
   # 出口选择器：DIRECT 还是代理，由 app 的双通道探针决定（app 是唯一大脑，
-  # 这里只执行不自主切换——曾用 fallback 自动判，健康检查 5 分钟滞后且
-  # 判定不稳，与 app 探针互相覆盖导致出口反复横跳）
+  # 这里只执行不自主切换）
   - name: hospital
     type: select
-    proxies: [DIRECT, hospital-auto]
+    proxies: [DIRECT, hospital-pin]
 
 rules:
   - DOMAIN-SUFFIX,my.gzsums.net,hospital

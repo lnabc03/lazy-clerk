@@ -17,7 +17,7 @@
                 {% endif %}
                 {% endif %}
                 {% if probe_url %}
-                <button class="btn btn-outline-secondary btn-sm py-0"
+                <button class="btn btn-outline-secondary btn-sm py-0" id="probeNowBtn"
                         onclick="probeNow('{{ probe_url }}')">立即检测</button>
                 {% endif %}
             </div>
@@ -50,9 +50,16 @@
 {% if probe_url %}
 <script>
 async function probeNow(url) {
-    const r = await fetch(url, {method: "POST"});
-    const d = await r.json();
-    alert(d.msg);
+    const btn = document.getElementById("probeNowBtn");
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm" aria-hidden="true"></span> 检测中';
+    try {
+        const r = await fetch(url, {method: "POST"});
+        const d = await r.json();
+        alert(d.msg);
+    } catch (e) {
+        alert("检测请求失败，请稍后再试");
+    }
     location.reload();  // 刷新热力图与状态徽标，无论成败都落库了
 }
 </script>

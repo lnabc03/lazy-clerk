@@ -92,6 +92,12 @@ def start() -> None:
     # 每小时过 7 分探测（避开整点高峰），结果供登录页热力图
     scheduler.add_job(_probe_job, CronTrigger(minute=7),
                       id="probe", name="可及性探测")
+    # 启动后 30 秒补一次探测：mihomo 重启后 hospital 组默认 DIRECT、钉节点组
+    # 默认订阅首个节点，都是未经实测的随机状态，尽快收敛到实测最优出口
+    from datetime import datetime, timedelta
+    scheduler.add_job(_probe_job, "date",
+                      run_date=datetime.now() + timedelta(seconds=30),
+                      id="probe_boot", name="启动探测")
     scheduler.start()
     log.info("调度器已启动（时区 %s）", settings.tz)
 

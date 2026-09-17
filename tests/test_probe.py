@@ -165,7 +165,7 @@ def test_probe_direct_fail_proxy_rescues(monkeypatch):
         _patch_switch(monkeypatch, calls)
         r = asyncio.run(client.probe())
         assert r.ok and r.channel == "proxy" and r.latency_ms == 561
-        assert calls == [f"{settings.proxy_group}-auto"]
+        assert calls == [f"{settings.proxy_group}-pin"]
         assert "节点A" in r.detail
     finally:
         _proxy_off()
@@ -181,7 +181,7 @@ def test_probe_node_dead_retest_rescues(monkeypatch):
         _patch_switch(monkeypatch, calls)
         r = asyncio.run(client.probe())
         assert r.ok and r.channel == "proxy" and r.latency_ms == 489
-        assert calls == [f"{settings.proxy_group}-auto"]
+        assert calls == [f"{settings.proxy_group}-pin"]
         assert "节点B" in r.detail
     finally:
         _proxy_off()

@@ -280,7 +280,7 @@ Content-Type: application/json
 | `/admin/invites`           | GET      | 管理员 | 查看剩余邀请码数量                                |
 | `/admin/invites/generate`  | POST     | 管理员 | 生成 1 个邀请码，未使用明文常驻管理页可见                  |
 | `/admin/invites/{id}/delete` | POST   | 管理员 | 删除未使用的邀请码（已使用的保留审计，不可删）                |
-| `/admin/check-all`         | POST     | 管理员 | 签到状态检测：逐一登录医院平台刷新所有启用账号当日真实状态（写 `checked` 日志，徽标直显真实状态，不签到不推送） |
+| `/admin/check-one/{id}`    | POST     | 管理员 | 签到状态检测（单账号）：登录医院平台刷新当日真实状态（写 `checked` 日志，徽标直显真实状态，不签到不推送）；管理页前端逐个串行调用、账号间休息 3 秒、每完成一个立即刷新该行 |
 | `/admin/settings/sendkey`  | POST     | 管理员 | 页面配置管理员 SendKey（入库覆盖 .env；留空清除）       |
 | `/admin/settings/password` | POST     | 管理员 | 修改管理员密码（验原密码，立即生效无需重启）                 |
 | `/admin/sign-now/{id}`     | POST     | 管理员 | 手动触发某账号当前时段签到（冒烟测试/补漏用；窗口外会收到服务端失败返回，原样展示） |

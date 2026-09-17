@@ -73,11 +73,11 @@ async def admin_page(request: Request, msg: str = "", error: str = ""):
 
 @router.post("/proxy/switch")
 async def proxy_switch(request: Request, target: str = Form(...)):
-    """切换代理出口：DIRECT 恢复直连优先，hospital-auto 强制自动选速，节点名手动指定。"""
+    """切换代理出口：DIRECT 恢复直连优先，auto 立即全量重测并钉最快节点，节点名手动钉选。"""
     if not is_admin(request):
         return redirect("/admin/login")
     from app.core.client import mihomo_switch
-    label = {"DIRECT": "直连", f"{settings.proxy_group}-auto": "自动选速"}.get(target, target)
+    label = {"DIRECT": "直连", "auto": "自动重选最快节点"}.get(target, target)
     err = await mihomo_switch(target)
     if err:
         return redirect("/admin", error=f"切换失败：{err}")
@@ -134,34 +134,29 @@ async def probe_now(request: Request):
     return {"ok": True, "msg": f"{status}：{p.detail}（{p.latency_ms}ms）{via}"}
 
 
-@router.post("/check-all")
-async def check_all(request: Request):
-    """签到状态检测：登录医院系统，刷新所有启用账号的当日真实状态。
+@router.post("/check-one/{user_id}")
+async def check_one(request: Request, user_id: int):
+    """签到状态检测（单账号）：前端逐个串行调用，每完成一个立即落库并刷新该行。
 
-    限并发 3 + 每账号 1–3 秒错峰：多账号经同一代理节点并发登录时，节点链路
-    逐请求随机失败（中转后端抽签），全并发会把瞬时抖动放大成整排红色。
-    串行逐个登录在账号多时会挂起几十秒，故折中。
+    历史教训：全账号合并在一个请求里（哪怕限并发 3 + 错峰），代理链路抖动时
+    总时长会顶破网关 60 秒超时——浏览器拿到 504 页面崩掉，完成了一半也看不见。
+    代理环境下并发反而放大失败率（同节点多连接抽签，中转后端逐请求随机失败）。
+    拆成单账号短请求后：每个请求独立成败，单个 504 只影响一行，页面不崩；
+    账号间 3 秒间隔由前端控制。check_user_status 内部已捕获全部异常并落库，
+    失败也会以红色徽标回显。
     """
-    import asyncio
-    import logging
-    import random
-
     if not is_admin(request):
-        return redirect("/admin/login")
-    users = [u for u in models.list_users() if u.enabled]
-    sem = asyncio.Semaphore(3)
-
-    async def _check(u, delay: float) -> None:
-        await asyncio.sleep(delay)
-        async with sem:
-            try:
-                await signer.check_user_status(u)
-            except Exception:
-                logging.getLogger("lazy-clerk.admin").exception("状态检测失败 user=%s", u.account)
-
-    await asyncio.gather(*(_check(u, i * random.uniform(1.0, 3.0))
-                           for i, u in enumerate(users)))
-    return redirect("/admin", msg=f"已检测 {len(users)} 个启用账号，结果见总览表")
+        return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
+    user = models.get_user(user_id)
+    if not user:
+        return JSONResponse({"ok": False, "msg": "用户不存在"}, status_code=404)
+    try:
+        checked = await signer.check_user_status(user)
+    except Exception as e:
+        return JSONResponse({"ok": False, "msg": f"{type(e).__name__}: {e}"})
+    today = models.today_results().get(user.id, {})
+    return {"ok": True, "checked": checked,
+            "badges": {p: make_badge(today.get(p)) for p in ("am", "pm")}}
 
 
 @router.post("/settings/sendkey")

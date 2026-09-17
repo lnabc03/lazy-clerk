@@ -12,10 +12,11 @@
     <div class="card-body">
         <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
             <h6 class="card-title mb-0">账号总览</h6>
-            <form method="post" action="/admin/check-all"
-                  onsubmit="return confirm('将登录医院平台刷新所有启用账号的当日状态，继续？')">
-                <button class="btn btn-primary btn-sm">签到状态检测</button>
-            </form>
+            <div class="d-flex align-items-center gap-2">
+                <span id="checkAllStatus" class="small text-muted"></span>
+                <button class="btn btn-primary btn-sm" id="checkAllBtn"
+                        onclick="checkAll()">签到状态检测</button>
+            </div>
         </div>
         {% if users %}
         <table class="table table-sm table-striped mb-0">
@@ -27,7 +28,8 @@
             </thead>
             <tbody>
             {% for item in users %}
-            <tr>
+            <tr data-user-id="{{ item.user.id }}"
+                data-enabled="{{ '1' if item.user.enabled else '0' }}">
                 <td>{{ item.user.nickname }}</td>
                 <td>{{ item.account_masked }}</td>
                 <td>{% if item.invite %}<code>{{ item.invite }}</code>{% else %}<span class="text-muted small">—</span>{% endif %}</td>
@@ -37,7 +39,7 @@
                     </span>
                 </td>
                 {% for p in ["am", "pm"] %}
-                <td>
+                <td data-period="{{ p }}">
                     {% set badge = item[p] %}
                     {% if badge %}
                     <span class="badge bg-{{ badge.color }}" title="{{ badge.title }}">
@@ -76,25 +78,25 @@
 
 <div class="card shadow-sm mb-3">
     <div class="card-body">
-        <h6 class="card-title">代理出口（mihomo）</h6>
+        <h6 class="card-title">代理出口</h6>
         {% if not proxy_configured %}
         <p class="small text-muted mb-0">未启用。医院封服务器 IP 时，按 .env.example 代理段配置后重启容器即可。</p>
         {% elif not proxy_info %}
-        <p class="small text-danger mb-0">已配置但 mihomo API 不可达——sidecar 容器未启动？</p>
+        <p class="small text-danger mb-0">代理组件未启动或不可达，请检查容器状态。</p>
         {% else %}
         <p class="small mb-2">
             当前出口：
             {% if proxy_info.now == "DIRECT" %}
-            <span class="badge bg-success">直连（服务器 IP）</span>
+            <span class="badge bg-success">直连</span>
             {% else %}
             <span class="badge bg-primary">代理：{{ proxy_info.node }}</span>
             {% endif %}
-            <span class="text-muted ms-1">平时无需干预——每小时探测直连/代理双通道，按实测自动调整出口。</span>
+            <span class="text-muted ms-1">系统每小时自动检测并维护最优出口，一般无需手动切换。</span>
         </p>
         <form method="post" action="/admin/proxy/switch" class="d-flex gap-2 flex-wrap align-items-center">
             <select name="target" class="form-select form-select-sm w-auto">
                 <option value="DIRECT">直连</option>
-                <option value="hospital-auto">代理 · 自动选速</option>
+                <option value="auto">自动选择最快节点</option>
                 {% for n in proxy_info.nodes %}
                 <option value="{{ n.name }}">
                     {{ n.name }}{{ (' · ' ~ n.delay ~ 'ms') if n.delay else ' · 近期测速失败' }}
@@ -104,8 +106,7 @@
             <button class="btn btn-outline-primary btn-sm text-nowrap">切换</button>
         </form>
         <p class="small text-muted mt-2 mb-0">
-            节点列表按实测延迟排序（仅列近期可达的）。手动指定节点在下次测速（约 5 分钟）后
-            可能被自动选速覆盖；直连/代理出口则由每小时探测按实测结果重新决定。
+            手动选择的节点会一直保持，失效时自动重选；列表延迟仅供参考。
         </p>
         {% endif %}
     </div>
@@ -169,6 +170,63 @@ async function delUser(id, nickname) {
     const r = await fetch(`/admin/users/${id}`, {method: "DELETE"});
     if (r.ok) location.reload();
     else alert("删除失败");
+}
+
+// 签到状态检测：逐个串行请求 /admin/check-one/<id>，每完成一个立即刷新该行，
+// 账号间休息 3 秒（代理节点逐连接随机失败，串行+间隔比并发成功率高得多；
+// 也避免全账号挤在一个长请求里被网关 504 整页崩掉）。
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function setBadge(td, b) {
+    td.textContent = "";
+    const s = document.createElement("span");
+    if (!b) {
+        s.className = "text-muted small";
+        s.textContent = "—";
+    } else {
+        s.className = "badge bg-" + b.color;
+        s.title = b.title || "";
+        s.textContent = b.text;
+    }
+    td.appendChild(s);
+}
+
+async function checkAll() {
+    const rows = [...document.querySelectorAll("tr[data-user-id]")]
+        .filter(tr => tr.dataset.enabled === "1");
+    if (!rows.length) { alert("没有启用的账号"); return; }
+    if (!confirm(`将逐个登录医院平台刷新 ${rows.length} 个启用账号的当日状态，` +
+                 `全程约需 1–2 分钟，请留在本页等待。继续？`)) return;
+    const btn = document.getElementById("checkAllBtn");
+    const status = document.getElementById("checkAllStatus");
+    btn.disabled = true;
+    let ok = 0, fail = 0;
+    for (let i = 0; i < rows.length; i++) {
+        const tr = rows[i];
+        const cells = [...tr.querySelectorAll("td[data-period]")];
+        status.textContent = `检测中 ${i + 1}/${rows.length}…`;
+        cells.forEach(td => setBadge(td, {text: "检测中", color: "secondary", title: ""}));
+        try {
+            const r = await fetch(`/admin/check-one/${tr.dataset.userId}`, {method: "POST"});
+            const data = await r.json().catch(() => null);
+            if (r.ok && data && data.ok) {
+                cells.forEach(td => setBadge(td, data.badges[td.dataset.period]));
+                // checked 才是"取回真实状态"的口径——请求 200 只代表流程跑完，
+                // 登录/拉取失败会以 failed 日志落库（红徽标），不算成功
+                if (data.checked) ok++; else fail++;
+            } else {
+                const msg = (data && data.msg) || `HTTP ${r.status}`;
+                cells.forEach(td => setBadge(td, {text: "检测失败", color: "danger", title: msg}));
+                fail++;
+            }
+        } catch (e) {
+            cells.forEach(td => setBadge(td, {text: "网络错误", color: "danger", title: String(e)}));
+            fail++;
+        }
+        if (i < rows.length - 1) await sleep(3000);
+    }
+    status.textContent = `完成：成功 ${ok} 个，失败 ${fail} 个`;
+    btn.disabled = false;
 }
 </script>
 {% endblock %}

@@ -32,12 +32,23 @@ def _admin_key() -> str | None:
     return _admin_key_resolver()
 
 
+# 推送标题前缀：公网版（我们托管的服务器）启动时设为 "[server] "，与自建
+# 个人版/宿舍版的推送区分开。默认空前缀，不设置即不影响其他版本。
+_title_prefix = ""
+
+
+def set_title_prefix(prefix: str) -> None:
+    global _title_prefix
+    _title_prefix = prefix
+
+
 async def notify(title: str, msg: str, sendkey: str | None = None) -> bool:
     """推送消息。优先级：参数 sendkey > 管理员 SendKey 回退；都无则记录告警。"""
     key = sendkey or _admin_key()
     if not key:
         log.warning("未配置 SendKey，跳过推送: %s", title)
         return False
+    title = _title_prefix + title
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.post(

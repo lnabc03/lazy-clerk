@@ -73,6 +73,12 @@ async def _mihomo_get(c: httpx.AsyncClient, path: str, **kw) -> httpx.Response:
                        headers={"Authorization": f"Bearer {settings.mihomo_secret}"}, **kw)
 
 
+async def _mihomo_put(c: httpx.AsyncClient, path: str, name: str) -> httpx.Response:
+    return await c.put(f"{settings.mihomo_api}{path}",
+                       headers={"Authorization": f"Bearer {settings.mihomo_secret}"},
+                       json={"name": name})
+
+
 async def _probe_direct(timeout: float) -> tuple[bool, int, str]:
     """直连通道：本机（不经代理）匿名 GET SSO 首页。返回 (ok, 耗时ms, 状态描述)。
 
@@ -96,16 +102,16 @@ async def _probe_direct(timeout: float) -> tuple[bool, int, str]:
 
 
 async def _probe_proxy(timeout: float) -> tuple[int | None, str]:
-    """代理通道：mihomo delay API 经 hospital-auto 当前节点实测医院首页。
+    """代理通道：mihomo delay API 经 hospital-pin 当前钉住节点实测医院首页。
 
     返回 (延迟ms, 节点名)；当前节点不可用或 API 不可达返回 (None, 节点名或"")。
-    只读不改：测的是 url-test 组当前选中的节点，不触发任何切换。
+    只读不改：测的是钉住的节点，不触发任何切换。
     """
     try:
         async with httpx.AsyncClient(timeout=timeout + 5) as c:
-            g = await _mihomo_get(c, f"/proxies/{settings.proxy_group}-auto")
+            g = await _mihomo_get(c, f"/proxies/{settings.proxy_group}-pin")
             node = g.json().get("now", "")
-            r = await _mihomo_get(c, f"/proxies/{settings.proxy_group}-auto/delay",
+            r = await _mihomo_get(c, f"/proxies/{settings.proxy_group}-pin/delay",
                                   params={"url": SSO_BASE + "/", "timeout": int(timeout * 1000)})
             if r.status_code == 200:
                 return int(r.json()["delay"]), node
@@ -115,19 +121,25 @@ async def _probe_proxy(timeout: float) -> tuple[int | None, str]:
 
 
 async def _proxy_group_retest(timeout: float) -> tuple[int | None, str]:
-    """全量重测 hospital-auto 所有节点，返回 (最佳延迟ms, 对应节点名)。
+    """全量重测 hospital-pin 所有节点的医院可达性，钉上最快通过者。
 
-    副作用即用途：url-test 按最新结果立即重选节点——当前节点死亡时的
-    即时自愈，不等 5 分钟测速周期。失败节点不在响应里；无可用节点返回 (None, "")。
+    返回 (最佳延迟ms, 对应节点名)；无可用节点返回 (None, "")。
+    副作用即用途：select 组不自主切换，钉一次长期有效——好节点一直用，
+    只在实测失败时由这里重选（节点死亡时的即时自愈）。
     """
     try:
-        async with httpx.AsyncClient(timeout=timeout + 10) as c:
-            r = await _mihomo_get(c, f"/group/{settings.proxy_group}-auto/delay",
+        # 全量重测 ~100 节点，mihomo 内部并发、单节点 timeout 封顶，
+        # 实测墙钟 10–20 秒，留足余量
+        async with httpx.AsyncClient(timeout=timeout + 30) as c:
+            r = await _mihomo_get(c, f"/group/{settings.proxy_group}-pin/delay",
                                   params={"url": SSO_BASE + "/", "timeout": int(timeout * 1000)})
             delays = {k: v for k, v in r.json().items() if isinstance(v, int) and v > 0}
             if not delays:
                 return None, ""
             node = min(delays, key=lambda k: delays[k])
+            p = await _mihomo_put(c, f"/proxies/{settings.proxy_group}-pin", node)
+            if p.status_code != 204:
+                return None, ""
             return delays[node], node
     except Exception:
         return None, ""
@@ -136,13 +148,14 @@ async def _proxy_group_retest(timeout: float) -> tuple[int | None, str]:
 async def probe(timeout: float = 8.0) -> ProbeResult:
     """双通道统一探针：直连与代理各测一次，按结果调整出口。手动检测、每小时
     定时探测、赛前守卫共用这一个行为——app 是出口决策的唯一大脑
-    （mihomo hospital 组是 selector，只执行不自主切换）。
+    （mihomo hospital 组是 selector，只执行不自主切换；节点选择同样由
+    app 钉住，hospital-pin 不自主重选）。
 
     决策矩阵：
       直连通           → 出口 DIRECT（含直连恢复后的自动切回）
-      直连不通、代理通 → 出口 hospital-auto
-      双不通           → 维持现状（防误切），判不可达；判死前会先对代理池
-                        全量重测一次，顺带完成节点自愈
+      直连不通、代理通 → 出口 hospital-pin（当前钉住节点）
+      双不通           → 维持现状（防误切），判不可达；判死前会先对节点池
+                        全量重测一次，顺带完成换节点自愈
     """
     d_ok, d_ms, d_detail = await _probe_direct(timeout)
     if not (settings.proxy_url and settings.mihomo_api):
@@ -151,7 +164,7 @@ async def probe(timeout: float = 8.0) -> ProbeResult:
 
     p_ms, p_node = await _probe_proxy(timeout)
     if p_ms is None and not d_ok:
-        # 直连已死且当前节点也不通：全量重测，换节点再定论
+        # 直连已死且当前钉住节点也不通：全量重测，换节点再定论
         p_ms, p_node = await _proxy_group_retest(timeout)
 
     proxy_part = (f"代理 {p_ms}ms" if p_ms is not None else "代理不可用")
@@ -159,10 +172,11 @@ async def probe(timeout: float = 8.0) -> ProbeResult:
         proxy_part += f"（{p_node}）"
     detail = f"直连 {d_ms}ms；{proxy_part}" if d_ok else f"直连{d_detail}；{proxy_part}"
 
+    pin_group = f"{settings.proxy_group}-pin"
     if d_ok:
         target, channel, ok, ms = "DIRECT", "direct", True, d_ms
     elif p_ms is not None:
-        target, channel, ok, ms = f"{settings.proxy_group}-auto", "proxy", True, p_ms
+        target, channel, ok, ms = pin_group, "proxy", True, p_ms
     else:
         return ProbeResult(False, detail, d_ms, await current_channel())
     want = "direct" if target == "DIRECT" else "proxy"
@@ -175,11 +189,12 @@ _last_retest = 0.0
 
 
 async def _retest_nodes_throttled() -> None:
-    """真实流量连续失败时的节点自愈：全量重测迫使 url-test 立即换掉坏节点。
+    """真实流量连续失败时的节点自愈：全量重测并钉上最快通过者。
 
     探针的单次采样可能在节点坏相中碰巧通过，真实流量的连续失败才是
     更可信的「该换节点了」信号。全局节流 120 秒——多账号并发失败时只
-    触发一次；测速开销对医院无感（节点池自带的 5 分钟健康检查同量级）。
+    触发一次；测速开销对医院无感（一次全量重测 ≈ 过去健康检查 5 分钟的量，
+    但只在真实失败时发生）。
     """
     global _last_retest
     if not settings.mihomo_api:
@@ -198,11 +213,11 @@ _JUNK_NODE_RE = re.compile(r"剩余流量|套餐|到期|官网|客服|距离|重
 async def mihomo_group() -> dict | None:
     """代理状态（管理页卡片）：{now, node, nodes: [{name, delay}]}。
 
-    now 为 hospital 组当前选择（DIRECT / hospital-auto）；node 为自动选速
-    当前节点。节点列表读 /providers/proxies——订阅节点不注册在 /proxies
-    命名空间（直接查会 404 刷屏），只有 provider 接口能看到它们。
-    延迟取健康检查的历史结果（被动读取，不产生新流量）；剔除假节点与
-    近期测速全挂的节点，按最近延迟升序，取前 20 个。
+    now 为 hospital 组当前出口（DIRECT / hospital-pin）；node 为 hospital-pin
+    当前钉住的节点。节点列表只读 sub 订阅（default/hospital 是自动生成的
+    组视图，混着组名）；延迟为中立 204 健康检查结果，仅作排序参考——医院
+    可达性以 app 实测为准（钉选/重选时用医院 URL 全量实测）。剔除假节点与
+    近期测速全挂的节点，按延迟升序取前 20。
     未配置或 API 不可达返回 None。
     """
     if not settings.mihomo_api:
@@ -210,41 +225,51 @@ async def mihomo_group() -> dict | None:
     try:
         async with httpx.AsyncClient(timeout=5) as c:
             g = (await _mihomo_get(c, f"/proxies/{settings.proxy_group}")).json()
-            auto = (await _mihomo_get(c, f"/proxies/{settings.proxy_group}-auto")).json()
+            pin = (await _mihomo_get(c, f"/proxies/{settings.proxy_group}-pin")).json()
             providers = (await _mihomo_get(c, "/providers/proxies")).json()
     except Exception:
         return None
     nodes = []
-    for provider in providers.get("providers", {}).values():
-        for p in provider.get("proxies", []):
-            name = p.get("name", "")
-            hist = p.get("history") or []
-            delay = hist[-1].get("delay") if hist else None
-            if not name or _JUNK_NODE_RE.search(name) or not delay:
-                continue
-            nodes.append({"name": name, "delay": delay})
+    for p in providers.get("providers", {}).get("sub", {}).get("proxies", []):
+        name = p.get("name", "")
+        hist = p.get("history") or []
+        delay = hist[-1].get("delay") if hist else None
+        if not name or _JUNK_NODE_RE.search(name) or not delay:
+            continue
+        nodes.append({"name": name, "delay": delay})
     nodes.sort(key=lambda n: n["delay"])
-    node = auto.get("now", "")
+    node = pin.get("now", "")
     if node and all(n["name"] != node for n in nodes):
-        nodes.insert(0, {"name": node, "delay": None})  # 当前节点测速挂过也保留可见
+        nodes.insert(0, {"name": node, "delay": None})  # 钉住节点测速挂过也保留可见
     return {"now": g.get("now", ""), "node": node, "nodes": nodes[:20]}
 
 
 async def mihomo_switch(target: str) -> str | None:
-    """切换出口。DIRECT/hospital-auto 作用于主组，具体节点作用于测速子组。
+    """切换出口/钉选节点。返回错误信息，成功为 None。
 
-    返回错误信息，成功为 None。注意：url-test 子组在下次测速（5 分钟）后
-    可能按延迟自动重选——手动指定适合"当前节点不通先换一个顶着"。
+    - DIRECT：恢复直连
+    - hospital-pin：启用代理出口（当前钉住的节点）
+    - auto：立即全量重测医院可达性并钉上最快通过者，启用代理出口
+    - 其余视为节点名：钉到 hospital-pin 并启用代理出口
+
+    钉住的节点长期有效，不会被任何周期测速覆盖——这正是设计目的。
     """
     if not settings.mihomo_api:
         return "未配置代理（MIHOMO_API 为空）"
-    group = (settings.proxy_group if target in ("DIRECT", f"{settings.proxy_group}-auto")
-             else f"{settings.proxy_group}-auto")
+    pin_group = f"{settings.proxy_group}-pin"
     try:
+        if target == "auto":
+            _, node = await _proxy_group_retest(8.0)
+            if not node:
+                return "当前无可用节点"
+            target = pin_group  # 重测已钉好节点，只需把出口拨到代理
         async with httpx.AsyncClient(timeout=5) as c:
-            r = await c.put(f"{settings.mihomo_api}/proxies/{group}",
-                            headers={"Authorization": f"Bearer {settings.mihomo_secret}"},
-                            json={"name": target})
+            if target in ("DIRECT", pin_group):
+                r = await _mihomo_put(c, f"/proxies/{settings.proxy_group}", target)
+            else:
+                r = await _mihomo_put(c, f"/proxies/{pin_group}", target)
+                if r.status_code == 204:
+                    r = await _mihomo_put(c, f"/proxies/{settings.proxy_group}", pin_group)
         if r.status_code == 204:
             return None
         return f"mihomo 返回 HTTP {r.status_code}: {r.text[:100]}"

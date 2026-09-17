@@ -39,6 +39,9 @@ app.include_router(admin.router)
 @app.on_event("startup")
 async def startup() -> None:
     from app import db
+    from app.core import notify
+    # 推送标题统一带 [server] 前缀，与用户自建的个人版/宿舍版推送区分
+    notify.set_title_prefix("[server] ")
     db.init()
     # 管理员密码：首次启动哈希入库，此后仅校验（改密码在管理页"管理员设置"）
     if settings.admin_password and not models.get_setting("admin_password_hash"):
