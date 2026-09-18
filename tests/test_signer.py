@@ -139,7 +139,7 @@ def test_sign_all_crash_isolated(monkeypatch):
 
 
 def test_retry_capped_at_max_attempts(monkeypatch):
-    """可重试失败最多尝试 MAX_ATTEMPTS 次（SSO 不可达不会自愈，多试无益）。"""
+    """可重试失败最多尝试 MAX_ATTEMPTS 次（预算需覆盖代理坏相的 ~15 分钟自愈周期）。"""
     calls = []
 
     async def fake_once(user, period):
@@ -158,7 +158,7 @@ def test_retry_capped_at_max_attempts(monkeypatch):
     outcome = asyncio.run(signer.sign_user_with_retry(
         _user(1, "a"), "am", log_fn=lambda *a: None))
     assert outcome.result == signer.RESULT_FAILED
-    assert calls.count("try") == signer.MAX_ATTEMPTS == 3
+    assert calls.count("try") == signer.MAX_ATTEMPTS == 8
     assert f"push:{signer.MAX_ATTEMPTS}" in calls
 
 

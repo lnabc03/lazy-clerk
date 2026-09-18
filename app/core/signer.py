@@ -31,7 +31,10 @@ LogFn = Callable[[int, str, str, str, str], None]
 PERIOD_NAME = {"am": "上午", "pm": "下午"}
 STOP_TIME = {"am": time(7, 28), "pm": time(14, 23)}
 RETRY_INTERVAL = 300  # 秒
-MAX_ATTEMPTS = 3      # 含首试。SSO 不可达是网络故障，短时间不会自愈，多试无益
+MAX_ATTEMPTS = 8      # 含首试。代理时代失败多为分钟级整段坏相（实测 13–15 分钟
+                      # 自愈），5 分钟间隔 × 8 次覆盖约 40 分钟，pm 仍在 STOP_TIME
+                      # 内（am 由 STOP_TIME 自然截断）。2026-09-17 下午教训：
+                      # 3 次 ≈ 12 分钟 < 一个坏相，放弃后 2 分钟网络即恢复
 
 RESULT_SUCCESS = "success"
 RESULT_FAILED = "failed"
