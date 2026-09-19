@@ -21,7 +21,7 @@ from personal.config import LOG_PATH, load, wizard  # noqa: E402
 notify.set_admin_key_resolver(None)
 
 TASK_NAMES = {"am": "lazy-clerk-sign-am", "pm": "lazy-clerk-sign-pm"}
-TASK_TIMES = {"am": "06:58", "pm": "13:00"}
+TASK_TIMES = {"am": "05:00", "pm": "13:00"}
 
 RESULT_TEXT = {
     "success": "签到成功", "skipped": "已经签过", "no_schedule": "今日此时段无需签到",
@@ -120,7 +120,7 @@ def cmd_install() -> int:
             return 1
         if not wintasks.enable_wakeup(name):
             print("睡眠唤醒开启失败（不影响锁屏签到），电脑睡眠时可能错过签到。")
-    print("自动签到已开启，每天 6:58 和 13:00 准时执行。")
+    print("自动签到已开启，每天 5:00 和 13:00 准时执行。")
     print("锁屏不影响签到；电脑插电时睡眠会自动唤醒执行。")
     print("错过时医院会在 7:00 和 14:00 提醒你。")
     return 0
@@ -155,7 +155,7 @@ async def interactive() -> int:
         print("=" * 46)
         print("\n第一次使用，先花半分钟完成配置：\n")
         await wizard()
-        answer = input("\n现在开启每天 6:58 / 13:00 的自动签到吗？[Y/n] ").strip().lower()
+        answer = input("\n现在开启每天 5:00 / 13:00 的自动签到吗？[Y/n] ").strip().lower()
         if answer in ("", "y", "yes"):
             cmd_install()
         print("\n都设置好了，祝你拥有美好的一天~")
@@ -169,7 +169,7 @@ async def interactive() -> int:
     await cmd_status()
     n_tasks = tasks_installed()
     if n_tasks == 2:
-        print("\n自动签到：已开启（每天 6:58 / 13:00）")
+        print("\n自动签到：已开启（每天 5:00 / 13:00）")
     elif n_tasks == 1:
         print("\n自动签到：异常，只注册了一个时段，建议重新开启")
     else:

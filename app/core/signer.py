@@ -2,7 +2,8 @@
 
 - 每个账号、每个时段独立执行，账号间失败隔离
 - 重试整体重跑主流程（会话分钟级过期，每次重新登录）
-- 停止时间：上午 7:28 / 下午 14:23（窗口关闭前留缓冲）
+- 打满全场：失败每隔几分钟重试、不限次数，拉锯到窗口关闭才停
+  （上午 8:00 / 下午 14:30）
 - 通知去重：同一时段同一账号只推"首次（认证类）"与"最终"两次
 """
 from __future__ import annotations
@@ -29,12 +30,12 @@ from typing import Callable  # noqa: E402
 LogFn = Callable[[int, str, str, str, str], None]
 
 PERIOD_NAME = {"am": "上午", "pm": "下午"}
-STOP_TIME = {"am": time(7, 28), "pm": time(14, 23)}
+# 打满全场：重试不限次数，由停止时间（= 医院窗口关闭时刻）自然截断。
+# 代理时代失败是分钟级整段坏相（实测最长 ~25 分钟），次数预算再大也可能
+# 被单个坏相吞掉；覆盖面只能靠时间窗口保证。2026-09-19 起 am 提前到 5:00
+# 开签——若医院侧尚未开放签到，服务端拒绝按可重试失败处理，正好边等边试。
+STOP_TIME = {"am": time(8, 0), "pm": time(14, 30)}
 RETRY_INTERVAL = 300  # 秒
-MAX_ATTEMPTS = 8      # 含首试。代理时代失败多为分钟级整段坏相（实测 13–15 分钟
-                      # 自愈），5 分钟间隔 × 8 次覆盖约 40 分钟，pm 仍在 STOP_TIME
-                      # 内（am 由 STOP_TIME 自然截断）。2026-09-17 下午教训：
-                      # 3 次 ≈ 12 分钟 < 一个坏相，放弃后 2 分钟网络即恢复
 
 RESULT_SUCCESS = "success"
 RESULT_FAILED = "failed"
@@ -196,7 +197,7 @@ async def sign_user_with_retry(
     period: str,
     log_fn: "LogFn | None" = None,
 ) -> SignOutcome:
-    """带重试的签到：成功/终态即停；可重试失败每 5 分钟重跑，超过停止时间推最终告警。
+    """带重试的签到：成功/终态即停；可重试失败每 5 分钟重跑、不限次数，打到停止时间推最终告警。
 
     log_fn(user_id, date, period, result, message)：日志落库回调，
     默认写 SQLite；个人版传入文件日志即可脱离数据库运行。
@@ -230,14 +231,14 @@ async def sign_user_with_retry(
             return outcome
 
         now = datetime.now(TZ).time()
-        if attempts >= MAX_ATTEMPTS or now >= STOP_TIME[period]:
+        if now >= STOP_TIME[period]:
             log_fn(user.id, today, period, RESULT_FAILED,
-                   f"重试耗尽（{attempts} 次）: {outcome.message}")
+                   f"窗口关闭（已尝试 {attempts} 次）: {outcome.message}")
             await push_final_failure(user, period, outcome.message, attempts)
             return outcome
 
-        log.info("签到失败将重试（第 %d/%d 次）user=%s period=%s: %s",
-                 attempts + 1, MAX_ATTEMPTS, user.account, period, outcome.message)
+        log.info("签到失败将重试（第 %d 次）user=%s period=%s: %s",
+                 attempts + 1, user.account, period, outcome.message)
         attempts += 1
         # 拟人化：重试间隔 5 分钟 ±1 分钟随机
         await asyncio.sleep(RETRY_INTERVAL + random.uniform(-60, 60))

@@ -138,12 +138,16 @@ def test_sign_all_crash_isolated(monkeypatch):
     assert ran == ["a", "b"]
 
 
-def test_retry_capped_at_max_attempts(monkeypatch):
-    """可重试失败最多尝试 MAX_ATTEMPTS 次（预算需覆盖代理坏相的 ~15 分钟自愈周期）。"""
+def test_retry_unbounded_until_stop_time(monkeypatch):
+    """可重试失败不限次数（打满全场），由 STOP_TIME 截断并推最终告警。"""
     calls = []
 
     async def fake_once(user, period):
         calls.append("try")
+        if calls.count("try") >= 12:
+            # 越过旧 8 次预算后模拟窗口关闭（STOP_TIME 每轮重读，现场改即生效）
+            monkeypatch.setattr(signer, "STOP_TIME",
+                                {"am": time(0, 0), "pm": time(0, 0)})
         return signer.SignOutcome(signer.RESULT_FAILED, "SSO 网络错误", retryable=True)
 
     async def fake_push(user, period, reason, attempts):
@@ -158,8 +162,8 @@ def test_retry_capped_at_max_attempts(monkeypatch):
     outcome = asyncio.run(signer.sign_user_with_retry(
         _user(1, "a"), "am", log_fn=lambda *a: None))
     assert outcome.result == signer.RESULT_FAILED
-    assert calls.count("try") == signer.MAX_ATTEMPTS == 8
-    assert f"push:{signer.MAX_ATTEMPTS}" in calls
+    assert calls.count("try") == 12  # 不受次数预算限制
+    assert "push:12" in calls
 
 
 def test_sign_all_preflight_aborts_when_unreachable(monkeypatch):

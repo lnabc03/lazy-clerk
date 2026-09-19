@@ -8,7 +8,7 @@
   lazy-clerk-dorm.exe web        启动管理页 http://127.0.0.1:8787/admin
   lazy-clerk-dorm.exe sign am    签到全部启用账号（带 0–5 分钟随机延迟，计划任务用）
   lazy-clerk-dorm.exe sign-now   立即签到全部启用账号（无随机延迟，测试用）
-  lazy-clerk-dorm.exe install    注册每天 6:53 / 13:00 的签到计划任务
+  lazy-clerk-dorm.exe install    注册每天 5:00 / 13:00 的签到计划任务
   lazy-clerk-dorm.exe uninstall  删除签到计划任务
 """
 from __future__ import annotations
@@ -27,7 +27,7 @@ if not getattr(sys, "frozen", False):
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-TASKS = {"am": ("lazy-clerk-sign-am", "06:53"), "pm": ("lazy-clerk-sign-pm", "13:00")}
+TASKS = {"am": ("lazy-clerk-sign-am", "05:00"), "pm": ("lazy-clerk-sign-pm", "13:00")}
 
 
 # ---------- sign ----------
@@ -38,8 +38,8 @@ async def cmd_sign(period: str | None, jitter: bool) -> int:
 
     period = period or signer.current_period()
     if jitter:
-        # 拟人化：随机延迟 0–5 分钟。任务注册在 :53 / :00，即 6:53–6:58、
-        # 13:00–13:05；签到约 10 秒，赶在医院 7:00/14:00 系统提醒发出前完成
+        # 拟人化：随机延迟 0–5 分钟。任务注册在 :00，即 5:00–5:05、
+        # 13:00–13:05；签到窗口内不限次重试打满全场（至 8:00 / 14:30）
         delay = random.uniform(0, 300)
         print(f"随机延迟 {delay:.0f} 秒后开始{signer.PERIOD_NAME[period]}签到...")
         await asyncio.sleep(delay)
@@ -140,7 +140,7 @@ def cmd_install() -> int:
             return 1
         if not wintasks.enable_wakeup(name):
             print("睡眠唤醒开启失败（不影响锁屏签到），电脑睡眠时可能错过签到。")
-    print("自动签到已开启，每天 6:53–6:58 和 13:00–13:05 之间的随机时刻执行。")
+    print("自动签到已开启，每天 5:00–5:05 和 13:00–13:05 之间的随机时刻执行。")
     print("锁屏不影响签到；电脑插电时睡眠会自动唤醒执行。")
     print("错过时医院会在 7:00 和 14:00 提醒你。")
     return 0

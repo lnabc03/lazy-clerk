@@ -80,10 +80,11 @@ async def _probe_job() -> None:
 
 def start() -> None:
     # 拟人化：触发时间在基准点后 0–5 分钟内随机（jitter 只加不减，见
-    # APScheduler _apply_jitter），即 6:53–6:58、13:00–13:05。
-    # 上午上限不晚于 :58——签到约花 10 秒，保证 7:00 医院系统提醒发出前已完成；
-    # 下午窗口 13:00 开启即签（14:00 提醒前留足缓冲）
-    scheduler.add_job(signer.sign_all, CronTrigger(hour=6, minute=53, jitter=300), args=["am"],
+    # APScheduler _apply_jitter），即 5:00–5:05、13:00–13:05。
+    # 打满全场：签到窗口（am 至 8:00、pm 至 14:30）内不限次重试，
+    # 早开签是为了尽可能拉长拉锯覆盖面——若医院侧尚未开放签到，
+    # 服务端拒绝按可重试失败处理，由重试循环等到窗口开放。
+    scheduler.add_job(signer.sign_all, CronTrigger(hour=5, minute=0, jitter=300), args=["am"],
                       id="sign_am", name="上午签到")
     scheduler.add_job(signer.sign_all, CronTrigger(hour=13, minute=0, jitter=300), args=["pm"],
                       id="sign_pm", name="下午签到")
