@@ -1,7 +1,9 @@
 # lazy-clerk 设计稿
 
 > 实习医生考勤自动签到系统 · MIT 开源
-> 版本：v0.4 · 2026-09-12（新增第 14 章：个人版。**服务器版因医院 SSO 封禁服务器 IP 于 2026-09-12 起冻结归档**，仅保留仓库不维护；个人版为项目主线，复用 `app/core` 核心链路）
+> 更新：2026-09-20（三种形态平行维护：个人版 / 宿舍版 / 公网版。公网版代理逃生
+> 通道已成熟——双通道探针统一决策出口、钉节点架构（见 `server/mihomo/KNOWN_ISSUES.md`），
+> 已连续 3 天全账号全绿。三版共享 `app/core` 核心链路）
 
 ---
 
@@ -11,7 +13,7 @@
 
 - **License**：MIT
 - **用户规模**：< 20 人，多账号
-- **部署形态**：Linux 服务器多账号版本（同一套镜像；本地单账号使用时仅注册一个账号即可）
+- **部署形态**：个人版（Windows exe 单人）/ 宿舍版（Windows exe + 管理页，4–6 人）/ 公网版（Linux + Docker 多账号，< 20 人），三版共享 `app/core`
 - **技术栈**：Python 3.11+ / FastAPI / APScheduler / SQLite / httpx / pycryptodome / Jinja2
 
 ### 1.1 目标
@@ -158,8 +160,8 @@ Content-Type: application/json
 │   │     ├── /admin/login     管理员登录                   │
 │   │     └── /admin           管理/状态页                  │
 │   ├── 调度层  APScheduler (AsyncIOScheduler)             │
-│   │     ├── cron 58 6  * * *   上午签到                   │
-│   │     └── cron 58 13 * * *   下午签到                   │
+│   │     ├── cron 0 5 * * *  上午签到（+0–300s 随机抖动）  │
+│   │     └── cron 0 13 * * * 下午签到（+0–300s 随机抖动）  │
 │   ├── 核心层                                              │
 │   │     ├── HospitalClient   登录链路 + 考勤接口 (httpx)  │
 │   │     ├── crypto           RSA 密码加密 (pycryptodome)  │
@@ -309,7 +311,7 @@ Content-Type: application/json
 ## 7. 调度设计
 
 - **APScheduler（AsyncIOScheduler）** 随 FastAPI 进程启动，时区 `Asia/Shanghai`
-- 两个 cron 触发器：`58 6 * * *`、`58 13 * * *`（每天，含周末）
+- 两个 cron 触发器：`0 5 * * *`、`0 13 * * *` + 0–300s 随机抖动（每天，含周末）
 - 重试不用 APScheduler 动态加任务，由 signer 内部循环 + `asyncio.sleep(300)` 实现，逻辑集中
 - 容器内显式设置 `TZ=Asia/Shanghai`，避免宿主机时区坑
 - 进程重启后任务自动恢复（无持久化任务状态的需求——错过即错过，重试窗口内会自然覆盖）
@@ -370,7 +372,7 @@ Content-Type: application/json
 | S1 | 登录链路（窗口外即可测） | 三步链路走通，拿到 SSTokenCookie                           |
 | S2 | 拉取考勤列表       | 返回包含本人当日记录，字段完整                                   |
 | S3 | 目标行定位逻辑      | 正确输出"今日应签/已签/无需签到"的判定（不实际提交）                      |
-| S4 | 真实签到         | 仅可在窗口内验证：部署前挑一个窗口手动跑 `sign-now` 路径，或上线后首个 6:58 观察 |
+| S4 | 真实签到         | 仅可在窗口内验证：部署前挑一个窗口手动跑 `sign-now` 路径，或上线后首个 5:00 观察 |
 | S5 | 通知链路         | Server 酱测试消息送达                                    |
 | S6 | 注册闭环         | 邀请码注册 → 入库 → 邀请码失效                                |
 
@@ -448,9 +450,9 @@ TZ=Asia/Shanghai
 
 ---
 
-## 14. 个人版（v0.4 起为项目主线）
+## 14. 个人版
 
-> 背景：2026-09-12 医院 SSO 封禁服务器 IP（`docs/lazy-clerk-SSO故障报告与解决方案.md`），
+> 背景：2026-09-12 医院 SSO 封禁服务器 IP（排障史见 `server/mihomo/KNOWN_ISSUES.md`），
 > 根因"单 IP 代理多账号"命中风控。个人版让每人从自己电脑（天然正常用户 IP）发起签到，根治此问题。
 
 ### 14.1 形态与原则
@@ -459,16 +461,16 @@ TZ=Asia/Shanghai
 - **剔除**：多账号、Web 界面、管理端、邀请码、SQLite、Docker——全部不要
 - **保留三核心**：查询（status）、签到（sign）、推送（Server 酱）
 - **无数据库**：配置 `config.json`、日志 `sign.log`，均在 exe 同目录
-- **复用 `app/core`**：client / crypto / signer / notify 与服务器版单点维护，医院改版只改一处
+- **复用 `app/core`**：client / crypto / signer / notify 三版单点维护，医院改版只改一处
 
 ### 14.2 命令集
 
 | 命令 | 作用 |
 | --- | --- |
 | `lazy-clerk.exe setup` | 配置向导：先经医院 SSO 真实认证，通过才写 config.json |
-| `lazy-clerk.exe sign` | 当前时段签到（复用 signer 重试逻辑，5 分钟间隔至窗口缓冲） |
+| `lazy-clerk.exe sign` | 当前时段签到（复用 signer 重试逻辑，5 分钟±随机间隔打满全场至窗口关闭） |
 | `lazy-clerk.exe status` | 查询当日考勤状态（时段/状态/签到时间/科室） |
-| `lazy-clerk.exe install` | 注册 Windows 计划任务：每天 6:58 / 13:00 各一条 |
+| `lazy-clerk.exe install` | 注册 Windows 计划任务：每天 5:00 / 13:00 各一条 |
 | `lazy-clerk.exe uninstall` | 删除计划任务 |
 
 ### 14.3 关键决策
@@ -478,10 +480,11 @@ TZ=Asia/Shanghai
 - **推送**：成功/失败/需人工都推本人 SendKey（标题前置状态）；无 SendKey 则静默
 - **凭据**：config.json 明文存本机（用户自担，与服务器版 8.2 同一风险逻辑，但暴露面只剩本机）
 
-### 14.4 与服务器版的关系
+### 14.4 与其他形态的关系
 
-- 服务器版（v0.1.0 tag 冻结）：`app/` Web 层 + 调度 + Docker，仓库保留，不再主动维护
-- 个人版：`personal/` 目录，`app/core` 的改动同时惠及两者；服务器版如需复活可直接用最新 core
+- 三种形态平行维护，共享 `app/core`：医院系统改版只改 `app/core/client.py`，三版同时生效
+- 公网版（`server/`）：Web 层 + APScheduler + Docker，代理逃生通道已成熟（2026-09-17 定稿，架构决策见 `server/mihomo/KNOWN_ISSUES.md`）
+- 个人版（`personal/`）：`app/core` 的改动同时惠及三版
 
 ---
 
@@ -494,8 +497,8 @@ TZ=Asia/Shanghai
 
 ### 15.2 架构：双进程解耦
 
-- **签到执行器**：Windows 计划任务 6:53/13:00 拉起 `lazy-clerk-dorm.exe sign am|pm`，
-  进程内随机 sleep 0–300s（即 6:53–6:58 / 13:00–13:05，见 2.6 签到时间窗与系统提醒），跑完即退；
+- **签到执行器**：Windows 计划任务 5:00/13:00 拉起 `lazy-clerk-dorm.exe sign am|pm`，
+  进程内随机 sleep 0–300s（即 5:00–5:05 / 13:00–13:05，见 2.6 签到时间窗与系统提醒），跑完即退；
   顺带清理 90 天旧日志。无常驻进程，Web 崩溃不影响签到
 - **管理 Web**：仅管理员，127.0.0.1:8787，随用随开（双击 exe 或 start-web.bat），
   首次运行命令行引导播种管理员密码与 SendKey（此后管理页修改）
@@ -515,8 +518,8 @@ TZ=Asia/Shanghai
 
 **有意不同（勿"对齐"）**：
 
-- 触发时间：公网/宿舍 6:53–6:58 随机（拟人化防风控）；个人版 6:58 准点
-  （家庭正常 IP 无风控问题，且与 README 承诺一致）
+- 触发时间：公网/宿舍 5:00–5:05、13:00–13:05 随机（拟人化防风控）；个人版 5:00 / 13:00 准点
+  （家庭正常 IP 无风控压力，准点最可预期）
 - 推送回退：公网/宿舍有管理员兜底（`notify` 默认解析器走 DB/.env）；
   个人版无数据库，启动时 `set_admin_key_resolver(None)` 关闭兜底
 - 手动签到：Web（公网/宿舍）单次尝试走 `signer.sign_user_manual`（HTTP 不能挂起）；
