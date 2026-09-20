@@ -66,6 +66,8 @@ async def admin_page(request: Request, msg: str = "", error: str = ""):
                   admin_sendkey_masked=mask_sendkey(admin_sendkey),
                   heatmap=models.probe_heatmap(days=7),
                   probe_latest=models.latest_probe(),
+                  summary=models.service_summary(),
+                  sessions=models.session_analysis(days=7),
                   probe_url="/admin/probe",
                   proxy_configured=bool(settings.proxy_url),
                   proxy_info=await mihomo_group() if settings.mihomo_api else None)
@@ -76,8 +78,8 @@ async def proxy_switch(request: Request, target: str = Form(...)):
     """切换代理出口：DIRECT 恢复直连优先，auto 立即全量重测并钉最快节点，节点名手动钉选。"""
     if not is_admin(request):
         return redirect("/admin/login")
-    from app.core.client import mihomo_switch
-    label = {"DIRECT": "直连", "auto": "自动重选最快节点"}.get(target, target)
+    from app.core.client import mihomo_switch, strip_node_flag
+    label = {"DIRECT": "直连", "auto": "自动重选最快节点"}.get(target, strip_node_flag(target))
     err = await mihomo_switch(target)
     if err:
         return redirect("/admin", error=f"切换失败：{err}")

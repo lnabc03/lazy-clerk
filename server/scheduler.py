@@ -27,6 +27,9 @@ def _cleanup_logs() -> None:
     deleted = models.cleanup_probes(days=40)
     if deleted:
         log.info("清理 40 天前探测记录 %d 条", deleted)
+    deleted = models.cleanup_attempts(days=90)
+    if deleted:
+        log.info("清理 90 天前签到尝试记录 %d 条", deleted)
     deleted = models.cleanup_dead_invites()
     if deleted:
         log.info("清理死邀请码 %d 个", deleted)

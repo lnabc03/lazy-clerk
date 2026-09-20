@@ -1,6 +1,7 @@
 <!-- 医院系统可及性热力图（近 7 天 × 24 小时），登录页/用户页/管理页共用。
      上下文需要：heatmap（models.probe_heatmap，格子为 direct/proxy/fail/None）、
      probe_latest（models.latest_probe）；
+     可选 summary（models.service_summary）：传入则渲染顶部一句话服务摘要；
      可选 probe_url：传入则渲染「立即检测」按钮（fetch POST 该地址并弹结果）。 -->
 <div class="card shadow-sm mb-3">
     <div class="card-body p-3">
@@ -22,6 +23,9 @@
                 {% endif %}
             </div>
         </div>
+        {% if summary %}
+        <p class="svc-summary">本系统已为 <b>{{ summary.users }}</b> 名用户完成 <b>{{ summary.signs }}</b> 次签到，近 <b class="streak">{{ summary.stable_days }}</b> 天稳定运行</p>
+        {% endif %}
         <div class="mb-2">
             {% for day in heatmap %}
             <div class="probe-row">

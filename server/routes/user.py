@@ -27,7 +27,8 @@ async def login_page(request: Request, msg: str = "", error: str = ""):
         return redirect("/me")
     return render(request, "login.html", msg=msg, error=error,
                   heatmap=models.probe_heatmap(days=7),
-                  probe_latest=models.latest_probe())
+                  probe_latest=models.latest_probe(),
+                  summary=models.service_summary())
 
 
 @router.post("/login")
@@ -96,6 +97,7 @@ async def me(request: Request, msg: str = "", error: str = ""):
                   logs=models.logs_for_user(user.id, days=7),
                   heatmap=models.probe_heatmap(days=7),
                   probe_latest=models.latest_probe(),
+                  summary=models.service_summary(),
                   probe_url="/me/probe")
 
 

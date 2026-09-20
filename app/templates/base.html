@@ -19,6 +19,22 @@
         .probe-cell.none { background: #e9ecef; }
         .probe-legend { font-size: 10px; color: #6c757d; }
         .probe-legend .probe-cell { display: inline-block; vertical-align: -1px; }
+        /* 服务摘要（热力图卡内）：一句话，数字强调，稳定天数绿色 */
+        .svc-summary { text-align: center; font-size: 12.5px; color: #6c757d;
+                       background: linear-gradient(135deg, #f8fafc, #eff4fb);
+                       border: 1px solid #e8edf3; border-radius: 8px;
+                       padding: 7px 10px; margin-bottom: 10px; }
+        .svc-summary b { color: #212529; font-size: 14px; padding: 0 1px;
+                         font-variant-numeric: tabular-nums; }
+        .svc-summary .streak { color: #198754; }
+        /* 日志分析（管理页）：每轮完成 chip 与出口节点 chip */
+        .pace-chip { display: inline-block; font-size: 11px; background: #e7f1ff;
+                     color: #0d6efd; border-radius: 10px; padding: 1px 8px;
+                     margin: 1px 2px 1px 0; white-space: nowrap; }
+        .node-chip { display: inline-block; font-size: 11px; background: #f8f9fa;
+                     border: 1px solid #dee2e6; border-radius: 10px; padding: 1px 8px;
+                     margin: 1px 2px 1px 0; }
+        .analysis-detail td { border-top: none; padding-top: 0; }
     </style>
 </head>
 <body>

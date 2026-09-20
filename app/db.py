@@ -44,6 +44,17 @@ CREATE TABLE IF NOT EXISTS probe_logs (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_probe_logs_time ON probe_logs(created_at);
+CREATE TABLE IF NOT EXISTS sign_attempts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id     TEXT NOT NULL,             -- 场次：YYYY-MM-DD-am / YYYY-MM-DD-pm
+    user_id    INTEGER NOT NULL REFERENCES users(id),
+    round      INTEGER NOT NULL,          -- 该用户本场第几次尝试（1 起）
+    result     TEXT NOT NULL,
+    message    TEXT,
+    node       TEXT,                      -- 本次尝试的出口：直连 / 代理节点名
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sign_attempts_run ON sign_attempts(run_id);
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL

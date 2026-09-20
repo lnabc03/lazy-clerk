@@ -31,6 +31,15 @@ _GUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 
+# 订阅节点名常带国旗前缀（"🇭🇰|香港 01"、"🇯🇵 东京"），人读时统一剥掉。
+# 注意：回传 mihomo 的节点标识符必须用原始全名，只有展示处走这里。
+_FLAG_PREFIX_RE = re.compile(r"^(?:[\U0001F1E6-\U0001F1FF]{2}\s*[|｜·:：\-—_]?\s*)+")
+
+
+def strip_node_flag(name: str) -> str:
+    """剥掉节点名开头的国旗/分隔符前缀（展示用）；剥空则回落原名。"""
+    return _FLAG_PREFIX_RE.sub("", name) or name
+
 
 class AuthError(Exception):
     """服务器正常响应但认证失败（密码错误/账号锁定等）——重试无意义。"""
@@ -66,6 +75,25 @@ async def current_channel() -> str:
             return "direct" if now == "DIRECT" else "proxy"
     except Exception:
         return "proxy" if settings.proxy_url else "direct"
+
+
+async def current_node() -> str:
+    """当前出口的人读名称（签到逐轮落库用）：直连 / 钉住的代理节点名。
+
+    API 不可达时按部署形态给泛称（"代理"），不抛异常——落库失败不能影响签到。
+    """
+    if not settings.proxy_url:
+        return "直连"
+    if not settings.mihomo_api:
+        return "代理"
+    try:
+        if await current_channel() == "direct":
+            return "直连"
+        async with httpx.AsyncClient(timeout=5) as c:
+            g = await _mihomo_get(c, f"/proxies/{settings.proxy_group}-pin")
+            return g.json().get("now") or "代理"
+    except Exception:
+        return "代理"
 
 
 async def _mihomo_get(c: httpx.AsyncClient, path: str, **kw) -> httpx.Response:
@@ -169,7 +197,7 @@ async def probe(timeout: float = 8.0) -> ProbeResult:
 
     proxy_part = (f"代理 {p_ms}ms" if p_ms is not None else "代理不可用")
     if p_node:
-        proxy_part += f"（{p_node}）"
+        proxy_part += f"（{strip_node_flag(p_node)}）"
     detail = f"直连 {d_ms}ms；{proxy_part}" if d_ok else f"直连{d_detail}；{proxy_part}"
 
     pin_group = f"{settings.proxy_group}-pin"
@@ -211,10 +239,11 @@ _JUNK_NODE_RE = re.compile(r"剩余流量|套餐|到期|官网|客服|距离|重
 
 
 async def mihomo_group() -> dict | None:
-    """代理状态（管理页卡片）：{now, node, nodes: [{name, delay}]}。
+    """代理状态（管理页卡片）：{now, node, node_display, nodes: [{name, display, delay}]}。
 
     now 为 hospital 组当前出口（DIRECT / hospital-pin）；node 为 hospital-pin
-    当前钉住的节点。节点列表只读 sub 订阅（default/hospital 是自动生成的
+    当前钉住的节点。name/node 为原始全名（回传 mihomo 钉选用），display/node_display
+    为剥掉国旗前缀的展示名。节点列表只读 sub 订阅（default/hospital 是自动生成的
     组视图，混着组名）；延迟为中立 204 健康检查结果，仅作排序参考——医院
     可达性以 app 实测为准（钉选/重选时用医院 URL 全量实测）。剔除假节点与
     近期测速全挂的节点，按延迟升序取前 20。
@@ -236,12 +265,14 @@ async def mihomo_group() -> dict | None:
         delay = hist[-1].get("delay") if hist else None
         if not name or _JUNK_NODE_RE.search(name) or not delay:
             continue
-        nodes.append({"name": name, "delay": delay})
+        nodes.append({"name": name, "display": strip_node_flag(name), "delay": delay})
     nodes.sort(key=lambda n: n["delay"])
     node = pin.get("now", "")
     if node and all(n["name"] != node for n in nodes):
-        nodes.insert(0, {"name": node, "delay": None})  # 钉住节点测速挂过也保留可见
-    return {"now": g.get("now", ""), "node": node, "nodes": nodes[:20]}
+        # 钉住节点测速挂过也保留可见
+        nodes.insert(0, {"name": node, "display": strip_node_flag(node), "delay": None})
+    return {"now": g.get("now", ""), "node": node,
+            "node_display": strip_node_flag(node), "nodes": nodes[:20]}
 
 
 async def mihomo_switch(target: str) -> str | None:

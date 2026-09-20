@@ -77,6 +77,69 @@
 {% include "_probe_heatmap.html" %}
 
 <div class="card shadow-sm mb-3">
+    <div class="card-body p-3">
+        <h6 class="card-title">日志分析</h6>
+        {% if sessions %}
+        <table class="table table-sm mb-0">
+            <thead>
+            <tr><th>场次</th><th>轮次</th><th>每轮完成</th><th>成功出口</th><th>最终结果</th></tr>
+            </thead>
+            <tbody>
+            {% for s in sessions %}
+            <tr>
+                <td class="text-nowrap fw-semibold">{{ s.label }}</td>
+                <td class="text-nowrap">{{ s.rounds ~ ' 轮' if s.rounds else '—' }}</td>
+                <td>
+                    {% for r, n in s.pace %}
+                    <span class="pace-chip">第{{ r }} 轮 {{ n }} 人</span>
+                    {% else %}
+                    <span class="text-muted small">—</span>
+                    {% endfor %}
+                </td>
+                <td>
+                    {% for nd in s.nodes %}
+                    <span class="node-chip">{{ nd }}</span>
+                    {% else %}
+                    <span class="text-muted small">—</span>
+                    {% endfor %}
+                </td>
+                <td class="text-nowrap">
+                    {% if s.failed %}
+                    <span class="badge bg-danger" title="{{ s.failed_title }}">❌ {{ s.failed|length }} 人失败</span>
+                    {% elif s.manual %}
+                    <span class="badge bg-warning text-dark">⚠️ {{ s.manual|length }} 人需人工</span>
+                    {% else %}
+                    <span class="badge bg-success">✅ {{ s.ok }}/{{ s.users }}</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% if s.detail %}
+            <tr class="analysis-detail">
+                <td colspan="5">
+                    <details>
+                        <summary class="small text-muted" style="cursor:pointer">明细</summary>
+                        {% for d in s.detail %}
+                        <div class="small mt-1">
+                            第{{ d.round }} 轮：
+                            {% if d.ok %}✅ {{ d.ok|join('、') }}{% endif %}
+                            {% if d.ok and d.fail %}｜{% endif %}
+                            {% if d.fail %}❌ {{ d.fail|join('、') }}{% endif %}
+                        </div>
+                        {% endfor %}
+                    </details>
+                </td>
+            </tr>
+            {% endif %}
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p class="text-muted small mb-0">近 7 天暂无签到记录。</p>
+        {% endif %}
+    </div>
+</div>
+
+<div class="card shadow-sm mb-3">
     <div class="card-body">
         <h6 class="card-title">代理出口</h6>
         {% if not proxy_configured %}
@@ -89,7 +152,7 @@
             {% if proxy_info.now == "DIRECT" %}
             <span class="badge bg-success">直连</span>
             {% else %}
-            <span class="badge bg-primary">代理：{{ proxy_info.node }}</span>
+            <span class="badge bg-primary">代理：{{ proxy_info.node_display }}</span>
             {% endif %}
             <span class="text-muted ms-1">系统每小时自动检测并维护最优出口，一般无需手动切换。</span>
         </p>
@@ -99,7 +162,7 @@
                 <option value="auto">自动选择最快节点</option>
                 {% for n in proxy_info.nodes %}
                 <option value="{{ n.name }}">
-                    {{ n.name }}{{ (' · ' ~ n.delay ~ 'ms') if n.delay else ' · 近期测速失败' }}
+                    {{ n.display }}{{ (' · ' ~ n.delay ~ 'ms') if n.delay else ' · 近期测速失败' }}
                 </option>
                 {% endfor %}
             </select>

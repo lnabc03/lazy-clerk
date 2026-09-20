@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 from .. import models
 from ..config import settings
-from .client import AuthError, HospitalClient, LoginError, probe, probe_cached
+from .client import AuthError, HospitalClient, LoginError, current_node, probe, probe_cached
 from .notify import notify, notify_user_and_admin
 
 log = logging.getLogger("lazy-clerk.signer")
@@ -202,6 +202,7 @@ async def sign_user_with_retry(
     log_fn(user_id, date, period, result, message)：日志落库回调，
     默认写 SQLite；个人版传入文件日志即可脱离数据库运行。
     """
+    record_attempts = log_fn is None  # DB 模式才逐轮落库（管理页日志分析数据源）
     if log_fn is None:
         log_fn = lambda uid, date, p, result, msg: models.add_log(uid, date, p, result, msg)  # noqa: E731
     today = datetime.now(TZ).strftime("%Y-%m-%d")
@@ -209,6 +210,13 @@ async def sign_user_with_retry(
 
     while True:
         outcome = await sign_user_once(user, period)
+        if record_attempts:
+            # 逐轮落库（场次/轮次/出口节点/结果）。落库失败不能影响签到本身
+            try:
+                models.add_attempt(user.id, today, period, attempts,
+                                   outcome.result, outcome.message, await current_node())
+            except Exception:
+                log.exception("签到尝试落库失败（已忽略）user=%s", user.account)
 
         if outcome.result in (RESULT_SUCCESS, RESULT_SKIPPED, RESULT_NO_SCHEDULE):
             log_fn(user.id, today, period, outcome.result, outcome.message)
