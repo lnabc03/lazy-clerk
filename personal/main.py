@@ -15,13 +15,13 @@ if not getattr(sys, "frozen", False):
 
 from app.core import notify, signer, wintasks  # noqa: E402
 from app.models import User  # noqa: E402
-from personal.config import LOG_PATH, load, wizard  # noqa: E402
+from personal.config import (DEFAULT_TIMES, LOG_PATH, load,  # noqa: E402
+                             parse_task_time, save, wizard)
 
 # 个人版无数据库：关闭推送的管理员兜底回退，否则兜底会无谓地初始化 SQLite
 notify.set_admin_key_resolver(None)
 
 TASK_NAMES = {"am": "lazy-clerk-sign-am", "pm": "lazy-clerk-sign-pm"}
-TASK_TIMES = {"am": "05:00", "pm": "13:00"}
 
 RESULT_TEXT = {
     "success": "签到成功", "skipped": "已经签过", "no_schedule": "今日此时段无需签到",
@@ -106,21 +106,31 @@ async def cmd_status() -> int:
     return 0
 
 
-def cmd_install() -> int:
+def cmd_install(times: dict[str, str] | None = None) -> int:
+    """注册两个计划任务。times 为空时取 config.json 里的配置（无配置用默认）。"""
+    times = times or sign_times()
+    for period in ("am", "pm"):
+        # 手改 config.json 可能写入坏值：注册前再过一遍校验，坏了回落默认
+        normalized, err = parse_task_time(period, times[period])
+        if err:
+            print(f"配置的时间无效（{err}），{period} 时段回落默认 {DEFAULT_TIMES[period]}。")
+            times[period] = DEFAULT_TIMES[period]
+        else:
+            times[period] = normalized
     for period, name in TASK_NAMES.items():
         conflict = wintasks.conflicts_with(name, os.path.abspath(__file__))
         if conflict:
             print(f"计划任务 {name} 已存在且指向其他程序：{conflict}")
             print("这台电脑可能装过另一形态，请先卸载旧的再开启。")
             return 1
-        err = wintasks.create_daily(name, TASK_TIMES[period], "sign",
+        err = wintasks.create_daily(name, times[period], "sign",
                                     os.path.abspath(__file__))
         if err:
             print(f"注册计划任务失败：{err}")
             return 1
         if not wintasks.enable_wakeup(name):
             print("睡眠唤醒开启失败（不影响锁屏签到），电脑睡眠时可能错过签到。")
-    print("自动签到已开启，每天 5:00 和 13:00 准时执行。")
+    print(f"自动签到已开启，每天 {times['am']} 和 {times['pm']} 执行。")
     print("锁屏不影响签到；电脑插电时睡眠会自动唤醒执行。")
     print("错过时医院会在 7:00 和 14:00 提醒你。")
     return 0
@@ -136,6 +146,34 @@ def cmd_uninstall() -> int:
 def tasks_installed() -> int:
     """返回已注册的计划任务数量（0–2）。"""
     return sum(1 for name in TASK_NAMES.values() if wintasks.exists(name))
+
+
+def sign_times() -> dict[str, str]:
+    """当前配置的触发时间：config.json 为准，无配置用默认。"""
+    cfg = load()
+    if cfg:
+        return {"am": cfg.time_am, "pm": cfg.time_pm}
+    return dict(DEFAULT_TIMES)
+
+
+def prompt_times(current: dict[str, str]) -> dict[str, str]:
+    """交互录入两个时段的触发时间：回车保留括号内现值，逐项校验格式与签到窗口。"""
+    print("医院的签到窗口：上午 5:00–8:00，下午 13:00–14:30。")
+    print("失败会自动重试到窗口关闭，这里设的是每天首次触发的时间。")
+    result = {}
+    for period, label in (("am", "上午"), ("pm", "下午")):
+        while True:
+            text = input(f"{label}签到时间 [{current[period]}]: ").strip()
+            if not text:
+                result[period] = current[period]
+                break
+            normalized, err = parse_task_time(period, text)
+            if err:
+                print(err)
+                continue
+            result[period] = normalized
+            break
+    return result
 
 
 # ---------- 交互模式 ----------
@@ -155,9 +193,13 @@ async def interactive() -> int:
         print("=" * 46)
         print("\n第一次使用，先花半分钟完成配置：\n")
         await wizard()
-        answer = input("\n现在开启每天 5:00 / 13:00 的自动签到吗？[Y/n] ").strip().lower()
+        answer = input("\n现在开启自动签到吗？[Y/n] ").strip().lower()
         if answer in ("", "y", "yes"):
-            cmd_install()
+            cfg = load()
+            times = prompt_times(sign_times())
+            cfg.time_am, cfg.time_pm = times["am"], times["pm"]
+            save(cfg)
+            cmd_install(times)
         print("\n都设置好了，祝你拥有美好的一天~")
         pause()
         return 0
@@ -169,7 +211,8 @@ async def interactive() -> int:
     await cmd_status()
     n_tasks = tasks_installed()
     if n_tasks == 2:
-        print("\n自动签到：已开启（每天 5:00 / 13:00）")
+        t = sign_times()
+        print(f"\n自动签到：已开启（每天 {t['am']} / {t['pm']}）")
     elif n_tasks == 1:
         print("\n自动签到：异常，只注册了一个时段，建议重新开启")
     else:
@@ -180,7 +223,12 @@ async def interactive() -> int:
         print("  1. 立即签到")
         print("  2. 刷新状态")
         print("  3. 更改配置")
-        print("  4. 关闭自动签到" if n_tasks > 0 else "  4. 开启自动签到")
+        if n_tasks > 0:
+            t = sign_times()
+            print("  4. 关闭自动签到")
+            print(f"  5. 修改签到时间（当前 {t['am']} / {t['pm']}）")
+        else:
+            print("  4. 配置并启用自动签到")
         print("  0. 退出")
         choice = input("\n输入数字: ").strip()
 
@@ -199,10 +247,18 @@ async def interactive() -> int:
             if n_tasks > 0:
                 cmd_uninstall()
             else:
-                cmd_install()
+                times = prompt_times(sign_times())
+                cfg.time_am, cfg.time_pm = times["am"], times["pm"]
+                save(cfg)
+                cmd_install(times)
             n_tasks = tasks_installed()
+        elif choice == "5" and n_tasks > 0:
+            times = prompt_times(sign_times())
+            cfg.time_am, cfg.time_pm = times["am"], times["pm"]
+            save(cfg)
+            cmd_install(times)  # create_daily /f 覆盖旧任务，时间即刻生效
         else:
-            print("输入 0-4 之间的数字。")
+            print(f"输入 0-{5 if n_tasks > 0 else 4} 之间的数字。")
             continue
         pause()
 
@@ -216,7 +272,7 @@ USAGE = """lazy-clerk 个人版
   lazy-clerk.exe setup      配置账号密码
   lazy-clerk.exe sign       立即签到
   lazy-clerk.exe status     查询今日考勤
-  lazy-clerk.exe install    开启每天自动签到
+  lazy-clerk.exe install    开启自动签到（时间取 config.json，默认 05:00 / 13:00）
   lazy-clerk.exe uninstall  关闭自动签到
 """
 

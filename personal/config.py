@@ -7,8 +7,10 @@ from __future__ import annotations
 import getpass
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
+from datetime import time
 
 
 def base_dir() -> str:
@@ -21,6 +23,31 @@ def base_dir() -> str:
 CONFIG_PATH = os.path.join(base_dir(), "config.json")
 LOG_PATH = os.path.join(base_dir(), "sign.log")
 
+# 默认触发时间；用户可在「配置并启用自动签到」时自定义
+DEFAULT_TIMES = {"am": "05:00", "pm": "13:00"}
+
+# 医院签到窗口（设计稿 2.6）：触发时刻必须落在窗口内，终点为打满全场的停止时间，
+# 本身不可取（8:00 触发 = 窗口已关，当天必错过）
+WINDOWS = {"am": (time(5, 0), time(8, 0)), "pm": (time(13, 0), time(14, 30))}
+
+
+def parse_task_time(period: str, text: str) -> tuple[str | None, str | None]:
+    """校验并归一化触发时间。返回 ("HH:MM", None) 或 (None, 错误原因)。"""
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", text.strip())
+    if not m:
+        return None, f"格式不对：「{text}」，请按 HH:MM 输入（如 05:30）"
+    h, mi = int(m.group(1)), int(m.group(2))
+    if h > 23 or mi > 59:
+        return None, f"不是合法时刻：「{text}」"
+    t = time(h, mi)
+    start, end = WINDOWS[period]
+    label = "上午" if period == "am" else "下午"
+    if not (start <= t < end):
+        fmt = lambda x: x.strftime("%H:%M")  # noqa: E731
+        return None, (f"{label}签到窗口是 {fmt(start)}–{fmt(end)}，"
+                      f"「{text}」不在窗口内")
+    return f"{h:02d}:{mi:02d}", None
+
 
 @dataclass
 class PersonalConfig:
@@ -28,11 +55,14 @@ class PersonalConfig:
     account: str
     password: str
     sendkey: str  # 可为空字符串
+    time_am: str = DEFAULT_TIMES["am"]  # 计划任务触发时刻 HH:MM
+    time_pm: str = DEFAULT_TIMES["pm"]
 
     def to_dict(self) -> dict:
         return {
             "nickname": self.nickname, "account": self.account,
             "password": self.password, "sendkey": self.sendkey,
+            "time_am": self.time_am, "time_pm": self.time_pm,
         }
 
 
@@ -45,6 +75,9 @@ def load() -> PersonalConfig | None:
         return PersonalConfig(
             nickname=d["nickname"], account=d["account"],
             password=d["password"], sendkey=d.get("sendkey", ""),
+            # 旧版 config.json 无时间字段，回落默认
+            time_am=d.get("time_am") or DEFAULT_TIMES["am"],
+            time_pm=d.get("time_pm") or DEFAULT_TIMES["pm"],
         )
     except (KeyError, json.JSONDecodeError):
         return None
