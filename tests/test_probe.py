@@ -114,6 +114,7 @@ def _patch_channels(monkeypatch, proxy, retest=(None, ""), current="proxy"):
     """mock 三条外部依赖：钉住节点双端口结果、全量重测结果、当前出口。
 
     proxy: (综合延迟ms|None, 节点名, 明细)；retest: (延迟ms|None, 节点名)。"""
+    monkeypatch.setattr(client, "_last_switch", 0.0)  # 默认不在缓冲期
     monkeypatch.setattr(client, "_probe_proxy", lambda t=8.0: _fake(proxy))
     monkeypatch.setattr(client, "_proxy_group_retest", lambda t=8.0: _fake(retest))
     monkeypatch.setattr(client, "current_channel", lambda: _fake(current))
@@ -308,8 +309,11 @@ def test_probe_direct_5xx_down_4xx_alive(monkeypatch):
 
 # ---------- _proxy_group_retest 两阶段选点 ----------
 
-def _fake_mihomo(monkeypatch, sso_delays, att_delays, put_calls):
-    """sso_delays: group delay 返回值；att_delays: 单节点考勤复验值（None=不通）。"""
+def _fake_mihomo(monkeypatch, sso_delays, att_delays, put_calls, current=""):
+    """sso_delays: group delay 返回值；att_delays: 单节点 delay 值（None=不通）；
+    current: hospital-pin 当前钉住的节点（空 = 未钉，跳过粘性复验）。"""
+    monkeypatch.setattr(client, "_node_scorer", None)
+
     class R:
         def __init__(self, code, data):
             self.status_code, self._d = code, data
@@ -320,9 +324,11 @@ def _fake_mihomo(monkeypatch, sso_delays, att_delays, put_calls):
     async def fake_get(c, path, **kw):
         if path.startswith("/group/"):
             return R(200, sso_delays)
-        name = path.split("/")[2]
-        d = att_delays.get(name)
-        return R(200, {"delay": d}) if d else R(408, {})
+        if path.endswith("/delay"):
+            name = path.split("/")[2]
+            d = att_delays.get(name)
+            return R(200, {"delay": d}) if d else R(408, {})
+        return R(200, {"now": current})  # /proxies/{group}-pin
 
     async def fake_put(c, path, name):
         put_calls.append(name)
@@ -356,6 +362,130 @@ def test_group_retest_no_dual_port_node_returns_none(monkeypatch):
                  put_calls=puts)
     ms, node = asyncio.run(client._proxy_group_retest(5.0))
     assert ms is None and node == "" and puts == []
+
+
+def test_group_retest_sticky_keeps_current_node(monkeypatch):
+    """粘性：当前钉住节点双端口复验通过就保持不动，哪怕池里有明显更快的。"""
+    puts = []
+    _fake_mihomo(monkeypatch,
+                 sso_delays={"快节点": 50, "当前节点": 500},
+                 att_delays={"快节点": 60, "当前节点": 550},
+                 put_calls=puts, current="当前节点")
+    ms, node = asyncio.run(client._proxy_group_retest(5.0))
+    assert node == "当前节点" and ms == 550 and puts == []
+
+
+def test_group_retest_sticky_falls_through_when_current_dead(monkeypatch):
+    """当前钉住节点死了才走池子换节点。"""
+    puts = []
+    _fake_mihomo(monkeypatch,
+                 sso_delays={"死节点": 100, "活节点": 200},
+                 att_delays={"死节点": None, "活节点": 220},
+                 put_calls=puts, current="死节点")
+    ms, node = asyncio.run(client._proxy_group_retest(5.0))
+    assert node == "活节点" and ms == 220 and puts == ["活节点"]
+
+
+def test_group_retest_prefers_iepl_over_faster_relay(monkeypatch):
+    """类别分层：中转节点延迟再低，只要 IEPL 池有可用就不碰中转
+    （日志实证：IEPL 成功率 42% vs 中转 16%）。"""
+    puts = []
+    _fake_mihomo(monkeypatch,
+                 sso_delays={"🇭🇰|香港家宽-中转 02": 50, "🇭🇰|香港家宽-IEPL 02": 400},
+                 att_delays={"🇭🇰|香港家宽-中转 02": 60, "🇭🇰|香港家宽-IEPL 02": 450},
+                 put_calls=puts)
+    ms, node = asyncio.run(client._proxy_group_retest(5.0))
+    assert node == "🇭🇰|香港家宽-IEPL 02" and ms == 450
+    assert puts == ["🇭🇰|香港家宽-IEPL 02"]
+
+
+def test_group_retest_scorer_excludes_dead_node(monkeypatch):
+    """战绩判死（scorer 返回 None）的节点被跳过，落到次优类别。"""
+    _fake_mihomo(monkeypatch,
+                 sso_delays={"🇭🇰|香港-IEPL 03": 100, "🇭🇰|香港-中转 02": 300},
+                 att_delays={"🇭🇰|香港-IEPL 03": 120, "🇭🇰|香港-中转 02": 320},
+                 put_calls=(puts := []))
+    monkeypatch.setattr(client, "_node_scorer",
+                        lambda n: None if "IEPL" in n else 1.0)
+    ms, node = asyncio.run(client._proxy_group_retest(5.0))
+    assert node == "🇭🇰|香港-中转 02" and puts == ["🇭🇰|香港-中转 02"]
+
+
+def test_group_retest_scorer_reorders_within_class(monkeypatch):
+    """层内按 延迟×战绩系数 排序：战绩差的低延迟节点输给战绩好的稍慢节点。"""
+    _fake_mihomo(monkeypatch,
+                 sso_delays={"🇭🇰|甲-IEPL 01": 100, "🇭🇰|乙-IEPL 01": 200},
+                 att_delays={"🇭🇰|甲-IEPL 01": 110, "🇭🇰|乙-IEPL 01": 210},
+                 put_calls=(puts := []))
+    scores = {"🇭🇰|甲-IEPL 01": 3.0, "🇭🇰|乙-IEPL 01": 1.2}
+    monkeypatch.setattr(client, "_node_scorer", scores.get)
+    ms, node = asyncio.run(client._proxy_group_retest(5.0))
+    # 甲 110×3.0=330 > 乙 210×1.2=252 → 选乙
+    assert node == "🇭🇰|乙-IEPL 01" and puts == ["🇭🇰|乙-IEPL 01"]
+
+
+def test_group_retest_scorer_fallback_when_pool_emptied(monkeypatch):
+    """战绩过滤把池子掏空时放开过滤兜底：有节点可用就不判死。"""
+    _fake_mihomo(monkeypatch,
+                 sso_delays={"节点A": 100},
+                 att_delays={"节点A": 120},
+                 put_calls=(puts := []))
+    monkeypatch.setattr(client, "_node_scorer", lambda n: None)
+    ms, node = asyncio.run(client._proxy_group_retest(5.0))
+    assert node == "节点A" and puts == ["节点A"]
+
+
+def test_probe_warmup_skips_retest(monkeypatch):
+    """换节点缓冲期内探测失败：如实报红但不重测不换（防抖动环），标记 warmup。"""
+    _proxy_on()
+    try:
+        monkeypatch.setattr(client, "_last_switch", client.time.monotonic())
+        retest_calls = []
+
+        async def _retest(t=8.0):
+            retest_calls.append(1)
+            return (489, "节点B")
+        monkeypatch.setattr(client, "_proxy_group_retest", _retest)
+        monkeypatch.setattr(client, "_probe_proxy",
+                            lambda t=8.0: _fake((None, "新节点", "认证不通；考勤不通（新节点）")))
+        r = asyncio.run(client.probe())
+        assert not r.ok and r.warmup and "缓冲期" in r.detail
+        assert retest_calls == []
+    finally:
+        _proxy_off()
+
+
+# ---------- models.node_score：节点战绩打分 ----------
+
+def _att(run, node, result, n):
+    for i in range(n):
+        db.conn().execute(
+            "INSERT INTO sign_attempts (run_id, user_id, round, result, message, node,"
+            " created_at) VALUES (?,?,?,?,?,?,?)",
+            (run, 1, i + 1, result, "", node, "2026-09-30 13:00:00"))
+    db.conn().commit()
+
+
+def test_node_score_dead_star_and_unknown(tmp_path):
+    """死节点 None、明星低惩罚、小样本不干预；医院故障日不污染战绩。"""
+    _use_tmp_db(tmp_path)
+    models._node_stats_cache = None
+    try:
+        # 平台可用场次（场内有成功）：死节点 10 连败，明星 6/10
+        _att("2026-09-29-pm", "死节点", "failed", 10)
+        _att("2026-09-29-pm", "明星", "success", 6)
+        _att("2026-09-29-pm", "明星", "failed", 4)
+        _att("2026-09-29-pm", "小样本", "failed", 3)
+        # 医院故障场次（场内无成功）：20 连败不应计入任何节点战绩
+        _att("2026-10-01-am", "背锅侠", "failed", 20)
+        assert models.node_score("死节点") is None
+        assert abs(models.node_score("明星") - 1.8) < 1e-6
+        assert models.node_score("小样本") == 1.0
+        assert models.node_score("背锅侠") == 1.0  # 故障场次的失败不计入
+        assert models.node_score("没见过的新节点") == 1.0
+    finally:
+        models._node_stats_cache = None
+        _restore_db()
 
 
 # ---------- _fmt_exc：超时异常空消息补类型名 ----------

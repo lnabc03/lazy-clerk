@@ -13,7 +13,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app import models
 from app.config import settings
-from app.core import signer
+from app.core import client, signer
 
 log = logging.getLogger("lazy-clerk.scheduler")
 
@@ -49,6 +49,10 @@ async def _probe_job() -> None:
     from app.core.notify import notify
 
     p = await probe()
+    if not p.ok and p.warmup:
+        # 换节点缓冲期内的失败是暖机噪声，非可达性事实：不落库、不动状态机
+        log.info("缓冲期内探测，跳过本次状态更新: %s", p.detail)
+        return
     models.record_probe(p.ok, p.latency_ms, p.detail, p.channel)
     state = "up" if p.ok else "down"
     prev = models.get_setting("probe_last_state")
@@ -58,6 +62,9 @@ async def _probe_job() -> None:
             return  # 已知不可达，不重复告警
         await asyncio.sleep(20)
         p = await probe()  # 复核确认真的不通
+        if p.warmup:
+            log.info("复核处于缓冲期，跳过本次状态更新: %s", p.detail)
+            return
         models.record_probe(p.ok, p.latency_ms, p.detail, p.channel)
         if not p.ok:
             models.set_setting("probe_last_state", "down")
@@ -84,8 +91,9 @@ def start() -> None:
                       id="sign_pm", name="下午签到")
     scheduler.add_job(_cleanup_logs, CronTrigger(hour=3, minute=30),
                       id="cleanup", name="日志清理")
-    # 每小时过 7 分探测（避开整点高峰），结果供登录页热力图
-    scheduler.add_job(_probe_job, CronTrigger(minute=7),
+    # 每小时过 37 分探测（避开整点高峰，也避开签到窗口开局的前 20 分钟——
+    # 日志实证 :07 探测会在 5:07/13:07 窗口关键期触发换节点），结果供热力图
+    scheduler.add_job(_probe_job, CronTrigger(minute=37),
                       id="probe", name="可及性探测")
     # 启动后 30 秒补一次探测：mihomo 重启后 hospital 组默认 DIRECT、钉节点组
     # 默认订阅首个节点，都是未经实测的随机状态，尽快收敛到实测最优出口
@@ -93,6 +101,9 @@ def start() -> None:
     scheduler.add_job(_probe_job, "date",
                       run_date=datetime.now() + timedelta(seconds=30),
                       id="probe_boot", name="启动探测")
+    # 节点选点注入历史战绩（死节点禁用 + 延迟惩罚系数）；战绩是慢变量，
+    # 每小时缓存，无需随签到节奏刷新
+    client.set_node_scorer(models.node_score)
     scheduler.start()
     log.info("调度器已启动（时区 %s）", settings.tz)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -417,6 +418,52 @@ def cleanup_probes(days: int = 40) -> int:
     cur = conn().execute("DELETE FROM probe_logs WHERE created_at<?", (cutoff,))
     conn().commit()
     return cur.rowcount
+
+
+# ---------- 节点战绩（代理选点打分：由 server 启动时注入 client.set_node_scorer） ----------
+
+NODE_STATS_WINDOW_DAYS = 14  # 滚动窗口：节点质量随订阅与风控漂移，只看近两周
+NODE_STATS_MIN_SAMPLE = 8    # 样本下限：不足不干预（新节点有探索机会）
+NODE_STATS_DEAD_RATE = 0.05  # 样本足够且成功率低于此：判死禁用
+_NODE_STATS_TTL = 3600       # 战绩是慢变量，缓存 1 小时
+
+_node_stats_cache: tuple[float, dict[str, tuple[int, float]]] | None = None
+
+
+def _node_stats() -> dict[str, tuple[int, float]]:
+    """滚动窗口内各节点战绩：{节点名: (样本数, 成功率)}。
+
+    口径与日志分析一致：只统计平台可用场次（场内有成功的 run），剔除
+    医院侧故障日（如 2026-10-01 考勤端口关闭）对节点战绩的污染——
+    那种日子里谁当出口谁背锅，不是节点的错。"""
+    global _node_stats_cache
+    now = time.monotonic()
+    if _node_stats_cache and now - _node_stats_cache[0] < _NODE_STATS_TTL:
+        return _node_stats_cache[1]
+    cutoff = (datetime.now(TZ) - timedelta(days=NODE_STATS_WINDOW_DAYS)).strftime("%Y-%m-%d")
+    rows = conn().execute(
+        "SELECT node, COUNT(*) n, SUM(result='success') ok FROM sign_attempts"
+        " WHERE run_id >= ? AND result IN ('success','failed')"
+        " AND run_id IN (SELECT DISTINCT run_id FROM sign_attempts"
+        "                WHERE result='success' AND run_id >= ?)"
+        " GROUP BY node", (cutoff, cutoff)).fetchall()
+    stats = {r["node"]: (r["n"], r["ok"] / r["n"]) for r in rows}
+    _node_stats_cache = (now, stats)
+    return stats
+
+
+def node_score(name: str) -> float | None:
+    """节点选点惩罚系数：1 + 2×(1 − 成功率)，战绩越好越接近 1。
+
+    死节点（样本 ≥ 下限且成功率 < 5%）返回 None，选点时直接跳过。
+    作用于延迟的乘性惩罚：36% 成功率的劳模 ≈ ×2.3，59% 的明星 ≈ ×1.8，
+    延迟差在几百毫秒内时战绩起决定作用，跨数量级的延迟差仍能盖过战绩。"""
+    n, rate = _node_stats().get(name, (0, 1.0))
+    if n < NODE_STATS_MIN_SAMPLE:
+        return 1.0
+    if rate < NODE_STATS_DEAD_RATE:
+        return None
+    return 1.0 + 2.0 * (1.0 - rate)
 
 
 # ---------- settings ----------

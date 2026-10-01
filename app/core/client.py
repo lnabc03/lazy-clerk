@@ -64,6 +64,8 @@ class ProbeResult:
     detail: str            # 人读摘要，如 "认证 450ms；考勤 520ms（香港家宽-中转 02）"
     latency_ms: int
     channel: str = "direct"  # 出口：direct=直连（无代理部署）/ proxy=代理；仅落库兼容用
+    warmup: bool = False     # True = 换节点缓冲期内的测量：非决策级证据，
+                             # 调用方不计红、不落库、不告警（暖机噪声不是可达性事实）
 
 
 async def current_channel() -> str:
@@ -190,41 +192,130 @@ async def _probe_proxy(timeout: float) -> tuple[int | None, str, str]:
     return None, node, detail
 
 
+# ---------- 节点选点策略（2026-09 日志挖掘结论落地） ----------
+#
+# 14 天逐轮日志的三个关键事实：
+#   1. 切换缓冲期：换节点后 0-2 分钟真实流量成功率仅 25%，3-5 分钟达 74%。
+#      换节点本身有代价，频繁切换 = 不断重置缓冲期时钟。
+#   2. 类别差异：IEPL 专线成功率 42%，中转 16%（失败 100% 是机场网关 502，
+#      即中转出口 IP 被医院风控标记）。而「SSO 延迟最低」系统性地偏向中转
+#      ——用量第一的节点（中转，189 次尝试）成功率仅 12%。
+#   3. 抖动环：连败→按延迟换节点→缓冲期再败→再换。窗口前 20 分钟曾平均
+#      每 1-3 分钟切换一次。
+#
+# 对策闭环：粘性（当前节点能过就绝不换）+ 暖机（刚换完不重测）+
+# 类别分层（IEPL 优先）+ 历史战绩降权（scorer 钩子，server 侧注入）。
+
+WARMUP_SECONDS = 180  # 换节点缓冲期：日志实测约 3 分钟
+
+_last_switch = 0.0  # monotonic 时刻：上一次钉选变更（手动切换也算）
+
+# 节点战绩打分钩子：name → 延迟惩罚系数（>=1.0）；返回 None = 死节点禁用。
+# server 版启动时注入 models.node_score；无注入（个人版/宿舍版）时只用类别分层。
+_node_scorer: "Callable[[str], float | None] | None" = None
+
+
+def _mark_switch() -> None:
+    """记录一次钉选变更（暖机时钟起点）。"""
+    global _last_switch
+    _last_switch = time.monotonic()
+
+
+def set_node_scorer(fn: "Callable[[str], float | None] | None") -> None:
+    global _node_scorer
+    _node_scorer = fn
+
+
+def _node_class_rank(name: str) -> int:
+    """类别优先级：IEPL 0 < 未知 1 < 直连 2 < 中转 3（按 14 天实测成功率排序）。"""
+    if "IEPL" in name:
+        return 0
+    if "中转" in name:
+        return 3
+    if "直连" in name:
+        return 2
+    return 1
+
+
+async def _pick_node(c: httpx.AsyncClient, d_sso: dict[str, int],
+                     tms: int, use_scorer: bool = True) -> tuple[str, int] | None:
+    """在 SSO 可达节点池里选最优：类别分层，层内按（最差端口延迟 × 战绩系数）。
+
+    返回 (节点名, 最差端口延迟ms)；池内无双端口全通节点返回 None。
+    use_scorer=False 用于战绩过滤把池子掏空后的兜底重选。"""
+    pools: dict[int, list[tuple[str, int, float]]] = {}
+    for name, sso_ms in d_sso.items():
+        mult = 1.0
+        if use_scorer and _node_scorer:
+            try:
+                m = _node_scorer(name)
+            except Exception:
+                m = 1.0  # 战绩查询失败不阻断选点
+            if m is None:
+                continue  # 死节点
+            mult = m
+        pools.setdefault(_node_class_rank(name), []).append((name, sso_ms, mult))
+    for rank in sorted(pools):
+        pool = sorted(pools[rank], key=lambda x: x[1] * x[2])[:10]
+        atts = await asyncio.gather(*(
+            _mihomo_delay(c, f"/proxies/{name}/delay", ATT_BASE + "/", tms)
+            for name, _, _ in pool))
+        best: tuple[str, int, float] | None = None
+        for (name, sso_ms, mult), att in zip(pool, atts):
+            if att is None:
+                continue
+            worst = max(sso_ms, att)
+            if best is None or worst * mult < best[2]:
+                best = (name, worst, worst * mult)
+        if best is not None:
+            return best[0], best[1]
+    return None
+
+
 async def _proxy_group_retest(timeout: float) -> tuple[int | None, str]:
-    """全量重测 hospital-pin 节点的双端口可达性，钉上两端口都通且最差延迟最小者。
+    """全量重测 hospital-pin 节点的双端口可达性，必要时换钉最优节点。
 
     返回 (最差端口延迟ms, 对应节点名)；无可用节点返回 (None, "")。
-    副作用即用途：select 组不自主切换，钉一次长期有效——好节点一直用，
-    只在实测失败时由这里重选（节点死亡时的即时自愈）。
-    流程：SSO 全量重测 → 最快 10 个候选复验考勤端口。比全池双端口重测
-    对医院和机场的压力小一个量级。"""
+    流程：先复验当前钉住节点（双端口通过就保持不动——粘性，消灭
+    「每次测量最快者不同」的抖动源）；当前节点真死了才走池子：
+    SSO 全量重测 → 类别分层 → 层内最快 10 候选复验考勤端口 →
+    按（最差延迟 × 战绩系数）选最优。比全池双端口重测对医院和机场
+    的压力小一个量级。"""
     try:
         # 全量重测 ~100 节点，mihomo 内部并发、单节点 timeout 封顶，
         # 实测墙钟 10–20 秒，留足余量
         async with httpx.AsyncClient(timeout=timeout + 30) as c:
             tms = int(timeout * 1000)
+            pin_path = f"/proxies/{settings.proxy_group}-pin"
+            current = ""
+            try:
+                current = (await _mihomo_get(c, pin_path)).json().get("now", "")
+            except Exception:
+                pass
+            if current and not _JUNK_NODE_RE.search(current):
+                sso, att = await asyncio.gather(
+                    _mihomo_delay(c, f"/proxies/{current}/delay", SSO_BASE + "/", tms),
+                    _mihomo_delay(c, f"/proxies/{current}/delay", ATT_BASE + "/", tms))
+                if sso and att:
+                    return max(sso, att), current  # 粘性：不动
             r = await _mihomo_get(c, f"/group/{settings.proxy_group}-pin/delay",
                                   params={"url": SSO_BASE + "/", "timeout": tms})
-            d_sso = {k: v for k, v in r.json().items() if isinstance(v, int) and v > 0}
+            d_sso = {k: v for k, v in r.json().items()
+                     if isinstance(v, int) and v > 0 and not _JUNK_NODE_RE.search(k)}
+            d_sso.pop(current, None)
             if not d_sso:
                 return None, ""
-            candidates = sorted(d_sso, key=lambda k: d_sso[k])[:10]
-            atts = await asyncio.gather(*(
-                _mihomo_delay(c, f"/proxies/{name}/delay", ATT_BASE + "/", tms)
-                for name in candidates))
-            best: tuple[str, int] | None = None
-            for name, att in zip(candidates, atts):
-                if att is None:
-                    continue
-                worst = max(d_sso[name], att)
-                if best is None or worst < best[1]:
-                    best = (name, worst)
-            if best is None:
+            picked = await _pick_node(c, d_sso, tms)
+            if picked is None and _node_scorer:
+                picked = await _pick_node(c, d_sso, tms, use_scorer=False)
+            if picked is None:
                 return None, ""
-            p = await _mihomo_put(c, f"/proxies/{settings.proxy_group}-pin", best[0])
+            name, worst = picked
+            p = await _mihomo_put(c, pin_path, name)
             if p.status_code != 204:
                 return None, ""
-            return best[1], best[0]
+            _mark_switch()
+            return worst, name
     except Exception:
         return None, ""
 
@@ -238,7 +329,8 @@ async def probe(timeout: float = 8.0) -> ProbeResult:
     口径：可达 = SSO（1118）与考勤（1198）两个端口都通。配置了代理的部署
     只经代理探测（直连已被医院长期封禁，实测数月未恢复，退出决策——
     2026-10-01 起）；未配置代理的部署（个人版/宿舍版）走直连。代理节点
-    实测失败时先全量重测换节点再定论（坏相噪声不自愈会误红）。
+    实测失败时先全量重测再定论（坏相噪声不自愈会误红）；刚换过节点的
+    缓冲期（WARMUP_SECONDS）内只测不换，避免抖动环。
     """
     if not (settings.proxy_url and settings.mihomo_api):
         ok, ms, detail = await _probe_direct(timeout)
@@ -246,7 +338,13 @@ async def probe(timeout: float = 8.0) -> ProbeResult:
 
     ms, node, detail = await _probe_proxy(timeout)
     if ms is None:
-        # 当前钉住节点双端口未全通：全量重测换节点再定论
+        if time.monotonic() - _last_switch < WARMUP_SECONDS:
+            # 换节点缓冲期（实测约 3 分钟）内的失败大概率是暖机噪声：
+            # 如实上报测量结果，但不重测不换节点——否则缓冲期失败会
+            # 触发再切换，形成抖动环（2026-09 日志实证）。
+            return ProbeResult(False, f"{detail}；缓冲期内暂不切换", 0, "proxy",
+                               warmup=True)
+        # 当前钉住节点双端口未全通：全量重测（内部有粘性复验）再定论
         ms2, node2 = await _proxy_group_retest(timeout)
         if ms2 is None:
             return ProbeResult(False, f"{detail}；全量重测无可用节点", 0, "proxy")
@@ -255,27 +353,6 @@ async def probe(timeout: float = 8.0) -> ProbeResult:
         # 出口未挂在代理上（如 mihomo 重启后回默认 DIRECT）：拨回钉住组
         await mihomo_switch(f"{settings.proxy_group}-pin")
     return ProbeResult(True, detail, ms, "proxy")
-
-
-_last_retest = 0.0
-
-
-async def _retest_nodes_throttled() -> None:
-    """真实流量连续失败时的节点自愈：全量重测并钉上最快通过者。
-
-    探针的单次采样可能在节点坏相中碰巧通过，真实流量的连续失败才是
-    更可信的「该换节点了」信号。全局节流 120 秒——多账号并发失败时只
-    触发一次；测速开销对医院无感（一次全量重测 ≈ 过去健康检查 5 分钟的量，
-    但只在真实失败时发生）。
-    """
-    global _last_retest
-    if not settings.mihomo_api:
-        return
-    now = time.monotonic()
-    if now - _last_retest < 120:
-        return
-    _last_retest = now
-    await _proxy_group_retest(8.0)
 
 
 # 订阅里混入的套餐信息类假节点（"剩余流量：49.06 GB"、"套餐到期：长期有效" 等）
@@ -344,6 +421,7 @@ async def mihomo_switch(target: str) -> str | None:
             else:
                 r = await _mihomo_put(c, f"/proxies/{pin_group}", target)
                 if r.status_code == 204:
+                    _mark_switch()  # 手动换节点同样进入缓冲期
                     r = await _mihomo_put(c, f"/proxies/{settings.proxy_group}", pin_group)
         if r.status_code == 204:
             return None
@@ -392,8 +470,8 @@ class HospitalClient:
         await self._client.aclose()
 
     # 代理节点存在逐连接随机失败（中转入口后端轮询，抽到死节点 mihomo 即回
-    # 502），单次失败率可达五成但整体可用。对幂等请求做有限重试；连续失败
-    # 两次视为节点进入坏相，触发节点池全量重测换节点（节流 120s）后再试。
+    # 502），单次失败率可达五成但整体可用。对幂等请求做有限重试（只退避，
+    # 不在链路内换节点——换节点决策统一在探针）。
     # 签到动作（SignStuCate）不在此重试——外层 5 分钟重试循环会重新登录并
     # 先读状态，天然幂等。
     _RETRYABLE_EXC = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError,
@@ -414,9 +492,9 @@ class HospitalClient:
             except self._RETRYABLE_EXC as e:
                 last_resp, last_exc = None, e
             if attempt < retries:
-                if attempt >= 1:
-                    # 连续失败两次：多半是节点进入坏相而非单次抽签，先换节点再试
-                    await _retest_nodes_throttled()
+                # 只退避不换节点：换节点的唯一决策点是探针（单一大脑）。
+                # 链路内换节点无意义——换后有约 3 分钟缓冲死区，等不到
+                # 暖机完成这次链路和下一轮就已经过去了，只会添抖动。
                 await asyncio.sleep(0.8 * (2 ** attempt) + random.uniform(0, 0.6))
         if last_resp is not None:
             last_resp.raise_for_status()

@@ -212,8 +212,9 @@ async def _probe_gate(record: bool):
     下新鲜结果落库供热力图——故障期间热力图因此变密，正是最需要它的时刻。"""
     on_fresh = None
     if record:
-        on_fresh = lambda p: models.record_probe(  # noqa: E731
-            p.ok, p.latency_ms, p.detail, p.channel)
+        def on_fresh(p):
+            if not p.warmup:  # 暖机噪声非可达性事实，不落库不污染热力图
+                models.record_probe(p.ok, p.latency_ms, p.detail, p.channel)
     return await probe_cached(ttl=240, on_fresh=on_fresh)
 
 
@@ -275,6 +276,18 @@ async def sign_user_with_retry(
                 log.info("探测恢复，退出守候继续签到 user=%s period=%s",
                          user.account, period)
                 red_streak = 0
+            elif p.warmup:
+                # 刚换过节点的缓冲期：测量噪声不计红也不转绿，留在守候等暖机结束
+                log.info("缓冲期内探测，不计红 user=%s period=%s: %s",
+                         user.account, period, p.detail)
+                if datetime.now(TZ).time() >= STOP_TIME[period]:
+                    log_fn(user.id, today, period, RESULT_FAILED,
+                           f"窗口关闭（已尝试 {attempts} 次）: 医院系统持续无法访问")
+                    await push_final_failure(user, period, "医院系统持续无法访问",
+                                             attempts)
+                    return SignOutcome(RESULT_FAILED, "窗口关闭：医院系统持续无法访问")
+                await asyncio.sleep(RETRY_INTERVAL + random.uniform(-60, 60))
+                continue
             else:
                 red_streak += 1
                 log.info("门控探测连续失败 %d 次 user=%s period=%s: %s",
@@ -336,7 +349,7 @@ async def sign_user_with_retry(
         # 代理节点坏相等瞬态故障下探针也会红一次，但其重测换节点会顺带完成自愈，
         # 下一轮即转绿，不影响打满全场。
         p = await _probe_gate(record_attempts)
-        if not p.ok:
+        if not p.ok and not p.warmup:
             red_streak = 1
             log.info("门控探测不可达，转入守候 user=%s period=%s: %s",
                      user.account, period, p.detail)
@@ -390,14 +403,23 @@ async def _preflight(period: str) -> bool:
         _log_round_cancelled(today, period, "管理员取消了本轮签到")
         return False
     first = await probe()
-    models.record_probe(first.ok, first.latency_ms, first.detail, first.channel)
+    if not first.warmup:
+        models.record_probe(first.ok, first.latency_ms, first.detail, first.channel)
     if first.ok:
+        return True
+    if first.warmup:
+        # 刚换过节点的缓冲期：赛前探测撞上暖机噪声不是不可达证据，
+        # 放行让重试循环去打（其门控会接手真实故障的判定）
+        log.info("赛前探测处于缓冲期（%s），放行", first.detail)
         return True
     log.warning("赛前探测失败（%s），20 秒后复核", first.detail)
     await asyncio.sleep(20)
     second = await probe()
-    models.record_probe(second.ok, second.latency_ms, second.detail, second.channel)
-    if second.ok:
+    if not second.warmup:
+        models.record_probe(second.ok, second.latency_ms, second.detail, second.channel)
+    if second.ok or second.warmup:
+        if second.warmup:
+            log.info("赛前复核处于缓冲期（%s），放行", second.detail)
         return True
     log.warning("赛前探测复核仍失败（%s），本轮签到放弃", second.detail)
     _log_round_cancelled(today, period, "赛前探测连续失败，本轮签到未执行")
