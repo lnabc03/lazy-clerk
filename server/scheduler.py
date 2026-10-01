@@ -33,52 +33,43 @@ def _cleanup_logs() -> None:
     deleted = models.cleanup_dead_invites()
     if deleted:
         log.info("清理死邀请码 %d 个", deleted)
+    deleted = models.cleanup_skip_flags()
+    if deleted:
+        log.info("清理过期手动取消标记 %d 个", deleted)
 
 
 async def _probe_job() -> None:
-    """每小时双通道探测并落库（登录页热力图数据源）。
+    """每小时双端口探测并落库（登录页热力图数据源）。
 
-    probe() 统一完成测量与出口调整（直连/代理各测一次，app 是唯一决策大脑）；
-    这里只维护状态机与告警：direct（直连正常）/ proxy（代理出口）/ down
-    （双通道均不可达）。进入 down 需 20 秒后二次确认防抖动误报；出口在
-    直连与代理间切换会播报（说明直连疑似被封或已解封）。
+    probe() 统一完成测量与出口调整（代理节点实测失败时全量重测换节点，
+    app 是唯一决策大脑）；这里只维护状态机与告警：up（双端口可达）/ down。
+    进入 down 需 20 秒后二次确认防抖动误报。
     """
     from app.core.client import probe
     from app.core.notify import notify
 
     p = await probe()
     models.record_probe(p.ok, p.latency_ms, p.detail, p.channel)
-    state = "down" if not p.ok else p.channel
+    state = "up" if p.ok else "down"
     prev = models.get_setting("probe_last_state")
 
     if state == "down":
         if prev == "down":
             return  # 已知不可达，不重复告警
         await asyncio.sleep(20)
-        p = await probe()  # 复核确认双通道真的都不通
+        p = await probe()  # 复核确认真的不通
         models.record_probe(p.ok, p.latency_ms, p.detail, p.channel)
         if not p.ok:
             models.set_setting("probe_last_state", "down")
-            await notify("🚨医院系统不可达（定时探测）",
-                         f"直连与代理均不可用：{p.detail}\n"
-                         "签到将自动跳过，请关注代理节点状态。")
+            await notify("🚨医院系统暂时无法访问（定时探测）",
+                         f"{p.detail}\n"
+                         "故障期间的自动签到将自动取消，恢复后会另行通知。")
             return
-        state = p.channel
+        state = "up"
 
-    if state == prev:
-        return
     models.set_setting("probe_last_state", state)
     if prev == "down":
-        await notify("✅医院系统恢复可达",
-                     f"出口：{'直连' if state == 'direct' else '代理'}，{p.detail}")
-    elif prev and prev != state:
-        # direct ↔ proxy 切换：代理逃生启动或直连恢复
-        if state == "proxy":
-            await notify("🔀已切换到代理出口",
-                         "直连疑似被医院防火墙拦截，流量经代理节点出入，"
-                         "签到不受影响。直连恢复后探测会自动切回。")
-        else:
-            await notify("🔀已恢复直连出口", f"直连恢复可用，{p.detail}")
+        await notify("✅医院系统恢复可达", p.detail)
 
 
 def start() -> None:

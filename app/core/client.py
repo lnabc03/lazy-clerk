@@ -13,6 +13,7 @@ import asyncio
 import random
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import httpx
@@ -49,14 +50,20 @@ class LoginError(Exception):
     """登录链路异常（网络错误、页面结构变化等）——可重试。"""
 
 
-# ---------- 双通道连通性探针 ----------
+def _fmt_exc(e: Exception) -> str:
+    """格式化异常供日志/通知阅读。httpx 的超时类异常 str() 为空，补类型名
+    （2026-10-01 事故：338 条「考勤系统会话交换网络错误: 」空白消息全是 ConnectTimeout）。"""
+    return f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+
+
+# ---------- 连通性探针（双端口：SSO 1118 + 考勤 1198） ----------
 
 @dataclass
 class ProbeResult:
     ok: bool
-    detail: str            # 双通道人读摘要，如 "直连超时（疑似被防火墙拦截）；代理 561ms（🇭🇰|…）"
+    detail: str            # 人读摘要，如 "认证 450ms；考勤 520ms（香港家宽-中转 02）"
     latency_ms: int
-    channel: str = "direct"  # 生效出口：direct=直连 / proxy=代理（热力图分色依据）；双不通时为当前选择
+    channel: str = "direct"  # 出口：direct=直连（无代理部署）/ proxy=代理；仅落库兼容用
 
 
 async def current_channel() -> str:
@@ -107,110 +114,147 @@ async def _mihomo_put(c: httpx.AsyncClient, path: str, name: str) -> httpx.Respo
                        json={"name": name})
 
 
-async def _probe_direct(timeout: float) -> tuple[bool, int, str]:
-    """直连通道：本机（不经代理）匿名 GET SSO 首页。返回 (ok, 耗时ms, 状态描述)。
+async def _probe_get(c: httpx.AsyncClient, url: str) -> tuple[bool, int, str]:
+    """匿名 GET 一个端口首页。返回 (通否, 耗时ms, 失败形态)。
 
-    不登录、不带任何凭据，与浏览器打开登录页同构——封禁触发面在认证接口的
-    频次/失败率，分钟级以下的匿名 GET 不增封禁概率。trust_env=False 保证
-    不受环境变量里的 HTTP_PROXY 影响，测的是真直连。
-    """
+    不登录、不带任何凭据，与浏览器打开登录页同构；封禁触发面在认证接口的
+    频次/失败率，分钟级以下的匿名 GET 不增封禁概率。任何 HTTP 响应（含
+    302/4xx）都算端口活着，5xx 与传输层错误算不通。"""
     start = time.monotonic()
     ms = lambda: int((time.monotonic() - start) * 1000)  # noqa: E731
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True,
-                                     trust_env=False, headers={"User-Agent": UA}) as c:
-            r = await c.get(SSO_BASE + "/")
+        r = await c.get(url)
         if r.status_code < 500:
-            return True, ms(), "正常"
-        return False, ms(), f"HTTP {r.status_code} 服务端错误"
+            return True, ms(), ""
+        return False, ms(), f"HTTP {r.status_code}"
     except httpx.ConnectTimeout:
-        return False, ms(), "超时（疑似被防火墙拦截）"
+        return False, ms(), "超时"
     except httpx.HTTPError as e:
-        return False, ms(), f"网络错误: {type(e).__name__}"
+        return False, ms(), type(e).__name__
 
 
-async def _probe_proxy(timeout: float) -> tuple[int | None, str]:
-    """代理通道：mihomo delay API 经 hospital-pin 当前钉住节点实测医院首页。
+def _port_detail(name: str, ok: bool, ms: int, fail: str) -> str:
+    return f"{name} {ms}ms" if ok else f"{name}{fail}"
 
-    返回 (延迟ms, 节点名)；当前节点不可用或 API 不可达返回 (None, 节点名或"")。
-    只读不改：测的是钉住的节点，不触发任何切换。
-    """
+
+async def _probe_direct(timeout: float) -> tuple[bool, int, str]:
+    """直连通道（无代理部署用）：本机匿名 GET SSO 与考勤两个端口。
+
+    返回 (ok, 较慢端口耗时ms, 明细)。双通才算可达——只测 SSO 会在医院单独
+    关闭考勤端口时全绿误报（2026-10-01 实测事故）。trust_env=False 保证
+    不受环境变量里的 HTTP_PROXY 影响，测的是真直连。"""
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True,
+                                 trust_env=False, headers={"User-Agent": UA}) as c:
+        (s_ok, s_ms, s_d), (a_ok, a_ms, a_d) = await asyncio.gather(
+            _probe_get(c, SSO_BASE + "/"), _probe_get(c, ATT_BASE + "/"))
+    detail = (f"{_port_detail('认证', s_ok, s_ms, s_d)}；"
+              f"{_port_detail('考勤', a_ok, a_ms, a_d)}")
+    return s_ok and a_ok, max(s_ms, a_ms), detail
+
+
+async def _mihomo_delay(c: httpx.AsyncClient, path: str, url: str,
+                        timeout_ms: int) -> int | None:
+    """mihomo delay API 单点测量，失败/超时返回 None。"""
+    try:
+        r = await _mihomo_get(c, path, params={"url": url, "timeout": timeout_ms})
+        if r.status_code == 200:
+            delay = r.json().get("delay")
+            if isinstance(delay, int) and delay > 0:
+                return delay
+    except Exception:
+        pass
+    return None
+
+
+async def _probe_proxy(timeout: float) -> tuple[int | None, str, str]:
+    """代理通道：mihomo delay API 经 hospital-pin 当前钉住节点实测 SSO 与考勤
+    两个端口。返回 (综合延迟ms|None, 节点名, 明细)；任一端口不通综合延迟为 None。
+    只读不改：测的是钉住的节点，不触发任何切换。"""
     try:
         async with httpx.AsyncClient(timeout=timeout + 5) as c:
             g = await _mihomo_get(c, f"/proxies/{settings.proxy_group}-pin")
             node = g.json().get("now", "")
-            r = await _mihomo_get(c, f"/proxies/{settings.proxy_group}-pin/delay",
-                                  params={"url": SSO_BASE + "/", "timeout": int(timeout * 1000)})
-            if r.status_code == 200:
-                return int(r.json()["delay"]), node
-            return None, node
+            tms = int(timeout * 1000)
+            path = f"/proxies/{settings.proxy_group}-pin/delay"
+            sso, att = await asyncio.gather(
+                _mihomo_delay(c, path, SSO_BASE + "/", tms),
+                _mihomo_delay(c, path, ATT_BASE + "/", tms))
     except Exception:
-        return None, ""
+        return None, "", "代理组件不可达"
+    detail = (f"{_port_detail('认证', bool(sso), sso or 0, '不通')}；"
+              f"{_port_detail('考勤', bool(att), att or 0, '不通')}")
+    if node:
+        detail += f"（{strip_node_flag(node)}）"
+    if sso and att:
+        return max(sso, att), node, detail
+    return None, node, detail
 
 
 async def _proxy_group_retest(timeout: float) -> tuple[int | None, str]:
-    """全量重测 hospital-pin 所有节点的医院可达性，钉上最快通过者。
+    """全量重测 hospital-pin 节点的双端口可达性，钉上两端口都通且最差延迟最小者。
 
-    返回 (最佳延迟ms, 对应节点名)；无可用节点返回 (None, "")。
+    返回 (最差端口延迟ms, 对应节点名)；无可用节点返回 (None, "")。
     副作用即用途：select 组不自主切换，钉一次长期有效——好节点一直用，
     只在实测失败时由这里重选（节点死亡时的即时自愈）。
-    """
+    流程：SSO 全量重测 → 最快 10 个候选复验考勤端口。比全池双端口重测
+    对医院和机场的压力小一个量级。"""
     try:
         # 全量重测 ~100 节点，mihomo 内部并发、单节点 timeout 封顶，
         # 实测墙钟 10–20 秒，留足余量
         async with httpx.AsyncClient(timeout=timeout + 30) as c:
+            tms = int(timeout * 1000)
             r = await _mihomo_get(c, f"/group/{settings.proxy_group}-pin/delay",
-                                  params={"url": SSO_BASE + "/", "timeout": int(timeout * 1000)})
-            delays = {k: v for k, v in r.json().items() if isinstance(v, int) and v > 0}
-            if not delays:
+                                  params={"url": SSO_BASE + "/", "timeout": tms})
+            d_sso = {k: v for k, v in r.json().items() if isinstance(v, int) and v > 0}
+            if not d_sso:
                 return None, ""
-            node = min(delays, key=lambda k: delays[k])
-            p = await _mihomo_put(c, f"/proxies/{settings.proxy_group}-pin", node)
+            candidates = sorted(d_sso, key=lambda k: d_sso[k])[:10]
+            atts = await asyncio.gather(*(
+                _mihomo_delay(c, f"/proxies/{name}/delay", ATT_BASE + "/", tms)
+                for name in candidates))
+            best: tuple[str, int] | None = None
+            for name, att in zip(candidates, atts):
+                if att is None:
+                    continue
+                worst = max(d_sso[name], att)
+                if best is None or worst < best[1]:
+                    best = (name, worst)
+            if best is None:
+                return None, ""
+            p = await _mihomo_put(c, f"/proxies/{settings.proxy_group}-pin", best[0])
             if p.status_code != 204:
                 return None, ""
-            return delays[node], node
+            return best[1], best[0]
     except Exception:
         return None, ""
 
 
 async def probe(timeout: float = 8.0) -> ProbeResult:
-    """双通道统一探针：直连与代理各测一次，按结果调整出口。手动检测、每小时
-    定时探测、赛前守卫共用这一个行为——app 是出口决策的唯一大脑
-    （mihomo hospital 组是 selector，只执行不自主切换；节点选择同样由
-    app 钉住，hospital-pin 不自主重选）。
+    """统一探针：测量 + 出口调整。手动检测、每小时定时探测、赛前守卫、重试
+    门控共用这一个行为——app 是出口决策的唯一大脑（mihomo hospital 组是
+    selector，只执行不自主切换；节点选择同样由 app 钉住，hospital-pin
+    不自主重选）。
 
-    决策矩阵：
-      直连通           → 出口 DIRECT（含直连恢复后的自动切回）
-      直连不通、代理通 → 出口 hospital-pin（当前钉住节点）
-      双不通           → 维持现状（防误切），判不可达；判死前会先对节点池
-                        全量重测一次，顺带完成换节点自愈
+    口径：可达 = SSO（1118）与考勤（1198）两个端口都通。配置了代理的部署
+    只经代理探测（直连已被医院长期封禁，实测数月未恢复，退出决策——
+    2026-10-01 起）；未配置代理的部署（个人版/宿舍版）走直连。代理节点
+    实测失败时先全量重测换节点再定论（坏相噪声不自愈会误红）。
     """
-    d_ok, d_ms, d_detail = await _probe_direct(timeout)
     if not (settings.proxy_url and settings.mihomo_api):
-        return ProbeResult(d_ok, f"直连 {d_ms}ms" if d_ok else f"直连{d_detail}",
-                           d_ms, "direct")
+        ok, ms, detail = await _probe_direct(timeout)
+        return ProbeResult(ok, detail, ms, "direct")
 
-    p_ms, p_node = await _probe_proxy(timeout)
-    if p_ms is None and not d_ok:
-        # 直连已死且当前钉住节点也不通：全量重测，换节点再定论
-        p_ms, p_node = await _proxy_group_retest(timeout)
-
-    proxy_part = (f"代理 {p_ms}ms" if p_ms is not None else "代理不可用")
-    if p_node:
-        proxy_part += f"（{strip_node_flag(p_node)}）"
-    detail = f"直连 {d_ms}ms；{proxy_part}" if d_ok else f"直连{d_detail}；{proxy_part}"
-
-    pin_group = f"{settings.proxy_group}-pin"
-    if d_ok:
-        target, channel, ok, ms = "DIRECT", "direct", True, d_ms
-    elif p_ms is not None:
-        target, channel, ok, ms = pin_group, "proxy", True, p_ms
-    else:
-        return ProbeResult(False, detail, d_ms, await current_channel())
-    want = "direct" if target == "DIRECT" else "proxy"
-    if await current_channel() != want:
-        await mihomo_switch(target)
-    return ProbeResult(ok, detail, ms, channel)
+    ms, node, detail = await _probe_proxy(timeout)
+    if ms is None:
+        # 当前钉住节点双端口未全通：全量重测换节点再定论
+        ms2, node2 = await _proxy_group_retest(timeout)
+        if ms2 is None:
+            return ProbeResult(False, f"{detail}；全量重测无可用节点", 0, "proxy")
+        ms, detail = ms2, f"重测换节点后可达 {ms2}ms（{strip_node_flag(node2)}）"
+    if await current_channel() != "proxy":
+        # 出口未挂在代理上（如 mihomo 重启后回默认 DIRECT）：拨回钉住组
+        await mihomo_switch(f"{settings.proxy_group}-pin")
+    return ProbeResult(True, detail, ms, "proxy")
 
 
 _last_retest = 0.0
@@ -311,13 +355,22 @@ async def mihomo_switch(target: str) -> str | None:
 _probe_cache: tuple[float, ProbeResult] | None = None
 
 
-async def probe_cached(ttl: float = 60.0) -> ProbeResult:
-    """带 60 秒缓存的探测：并行场景（多人同时失败告警）共享一次结果。"""
+async def probe_cached(ttl: float = 60.0,
+                       on_fresh: "Callable[[ProbeResult], None] | None" = None
+                       ) -> ProbeResult:
+    """带缓存的探测：并行场景（多账号重试循环同时门控）共享一次结果。
+    on_fresh：缓存未命中、真实探测完成后的回调（如落库供热力图），回调
+    异常被吞掉——记录失败不能影响签到。"""
     global _probe_cache
     if _probe_cache and time.monotonic() - _probe_cache[0] < ttl:
         return _probe_cache[1]
     result = await probe()
     _probe_cache = (time.monotonic(), result)
+    if on_fresh:
+        try:
+            on_fresh(result)
+        except Exception:
+            pass
     return result
 
 
@@ -413,7 +466,7 @@ class HospitalClient:
             )
             r2.raise_for_status()
         except httpx.HTTPError as e:
-            raise LoginError(f"SSO 网络错误: {e}") from e
+            raise LoginError(f"SSO 网络错误: {_fmt_exc(e)}") from e
 
         token = self._extract_token(r2)
         if not token:
@@ -423,7 +476,7 @@ class HospitalClient:
             r3 = await self._request("POST", ATT_BASE + "/", data={"Token": token})
             r3.raise_for_status()
         except httpx.HTTPError as e:
-            raise LoginError(f"考勤系统会话交换网络错误: {e}") from e
+            raise LoginError(f"考勤系统会话交换网络错误: {_fmt_exc(e)}") from e
 
         if "SSTokenCookie" not in self._client.cookies:
             raise LoginError("考勤系统未签发 SSTokenCookie（Token 交换失败）")
@@ -439,7 +492,7 @@ class HospitalClient:
             )
             r.raise_for_status()
         except httpx.HTTPError as e:
-            raise LoginError(f"拉取考勤列表失败: {e}") from e
+            raise LoginError(f"拉取考勤列表失败: {_fmt_exc(e)}") from e
         data = r.json()
         if not isinstance(data, list):
             raise LoginError(f"考勤列表返回格式异常: {str(data)[:200]}")
@@ -454,7 +507,7 @@ class HospitalClient:
             )
             r.raise_for_status()
         except httpx.HTTPError as e:
-            raise LoginError(f"签到请求失败: {e}") from e
+            raise LoginError(f"签到请求失败: {_fmt_exc(e)}") from e
         return r.json()
 
 

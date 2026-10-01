@@ -60,6 +60,10 @@ async def admin_page(request: Request, msg: str = "", error: str = ""):
     } for u in models.list_users()]
     admin_sendkey = (models.get_setting("serverchan_sendkey")
                      or settings.serverchan_sendkey)
+    from datetime import datetime
+    today_str = datetime.now(signer.TZ).strftime("%Y-%m-%d")
+    skip_today = {p: bool(models.get_setting(signer.skip_key(today_str, p)))
+                  for p in ("am", "pm")}
     return render(request, "admin.html", msg=msg, error=error,
                   users=users,
                   unused_invites=models.list_unused_invites(),
@@ -69,8 +73,31 @@ async def admin_page(request: Request, msg: str = "", error: str = ""):
                   summary=models.service_summary(),
                   sessions=models.session_analysis(days=7),
                   probe_url="/admin/probe",
+                  skip_today=skip_today,
                   proxy_configured=bool(settings.proxy_url),
                   proxy_info=await mihomo_group() if settings.mihomo_api else None)
+
+
+@router.post("/sign-skip/{period}")
+async def sign_skip(request: Request, period: str):
+    """取消/恢复今日某场次的自动签到（仅当天有效，次日自动失效）。
+
+    取消后赛前守卫直接跳过该场；进行中的重试循环每轮检查标记，点上立即生效。
+    场景：预知医院系统维护/关闭（如节假日），避免全天无效重试。
+    """
+    if not is_admin(request):
+        return redirect("/admin/login")
+    if period not in ("am", "pm"):
+        return redirect("/admin", error="场次无效")
+    from datetime import datetime
+    today = datetime.now(signer.TZ).strftime("%Y-%m-%d")
+    key = signer.skip_key(today, period)
+    label = signer.PERIOD_NAME[period]
+    if models.get_setting(key):
+        models.delete_setting(key)
+        return redirect("/admin", msg=f"已恢复今日{label}签到")
+    models.set_setting(key, "1")
+    return redirect("/admin", msg=f"已取消今日{label}签到（含进行中的重试），次日自动失效")
 
 
 @router.post("/proxy/switch")
@@ -125,15 +152,14 @@ async def delete_invite(request: Request, invite_id: int):
 
 @router.post("/probe")
 async def probe_now(request: Request):
-    """手动探测医院系统连通性（匿名 GET SSO 首页），结果入 probe_logs 供热力图。"""
+    """手动探测医院系统连通性（匿名 GET SSO 与考勤两个端口），结果入 probe_logs 供热力图。"""
     if not is_admin(request):
         return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
     from app.core.client import probe
     p = await probe()
     models.record_probe(p.ok, p.latency_ms, p.detail, p.channel)
     status = "✅ 可达" if p.ok else "❌ 不可达"
-    via = "（代理出口）" if p.ok and p.channel == "proxy" else ""
-    return {"ok": True, "msg": f"{status}：{p.detail}（{p.latency_ms}ms）{via}"}
+    return {"ok": True, "msg": f"{status}：{p.detail}"}
 
 
 @router.post("/check-one/{user_id}")

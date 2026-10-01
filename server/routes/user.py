@@ -103,15 +103,14 @@ async def me(request: Request, msg: str = "", error: str = ""):
 
 @router.post("/me/probe")
 async def probe_self(request: Request):
-    """用户自助探测医院系统连通性（匿名 GET SSO 首页），结果入 probe_logs。fetch 调用。"""
+    """用户自助探测医院系统连通性（匿名 GET SSO 与考勤两个端口），结果入 probe_logs。fetch 调用。"""
     if not current_user(request):
         return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
     from app.core.client import probe
     p = await probe()
     models.record_probe(p.ok, p.latency_ms, p.detail, p.channel)
     status = "✅ 可达" if p.ok else "❌ 不可达"
-    via = "（代理出口）" if p.ok and p.channel == "proxy" else ""
-    return JSONResponse({"ok": True, "msg": f"{status}：{p.detail}（{p.latency_ms}ms）{via}"})
+    return JSONResponse({"ok": True, "msg": f"{status}：{p.detail}"})
 
 
 @router.post("/me/sendkey")

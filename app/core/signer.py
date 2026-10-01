@@ -4,6 +4,10 @@
 - 重试整体重跑主流程（会话分钟级过期，每次重新登录）
 - 打满全场：失败每隔几分钟重试、不限次数，拉锯到窗口关闭才停
   （上午 8:00 / 下午 14:30）
+- 故障门控：可重试失败后先跑轻量探针（只探端口不登录），持续不可达则
+  转入守候模式只探不打；连红 8 次（约 40 分钟）判定持续性故障，取消本轮
+  并广播——2026-10-01 医院主动关闭考勤端口，11 账号全天打满 500+ 次
+  完整登录链路的教训
 - 通知去重：同一时段同一账号只推"首次（认证类）"与"最终"两次
 """
 from __future__ import annotations
@@ -36,6 +40,16 @@ PERIOD_NAME = {"am": "上午", "pm": "下午"}
 # 开签——若医院侧尚未开放签到，服务端拒绝按可重试失败处理，正好边等边试。
 STOP_TIME = {"am": time(8, 0), "pm": time(14, 30)}
 RETRY_INTERVAL = 300  # 秒
+# 门控探针连红次数阈值：约 40 分钟确认持续性故障后取消本轮。代理节点坏相
+# 造成的偶发红会被探针的重测换节点自愈吸收，连不到 8 次；医院侧持续故障
+# （主动关闭服务等）才会触达。注意不是按登录失败计数——正常签到日也常有
+# 10 轮以内的重试（节点 502 噪声），按登录失败计数会误伤。
+RED_STREAK_CANCEL = 8
+
+
+def skip_key(date: str, period: str) -> str:
+    """管理员手动取消标记的 settings 键（含日期，次日自然失效）。"""
+    return f"skip_sign:{date}:{period}"
 
 RESULT_SUCCESS = "success"
 RESULT_FAILED = "failed"
@@ -151,18 +165,16 @@ async def push_no_sign_needed(user: models.User, period: str, reason: str) -> No
 
 async def push_final_failure(user: models.User, period: str, reason: str,
                              attempts: int) -> None:
-    # 附连通性诊断：区分「系统不可达（网络被封）」与「账号侧问题」，减少误判
+    # 附连通性诊断，只陈述探测事实，不作归因猜测（防火墙/风控/账号侧之类的
+    # 推断 2026-10-01 实测会误导）
     p = await probe_cached()
     if not p.ok:
-        diag = (f"连通性探测：医院系统不可达（{p.detail}）——当前网络出口疑似被防火墙拦截，"
-                "非账号问题，请换手机流量人工签到。")
-    elif p.channel == "proxy":
-        diag = "连通性探测：医院系统经代理可达（直连疑似被封）——疑似账号侧问题。"
+        diag = "连通性探测：医院系统当前也无法访问。"
     else:
-        diag = "连通性探测：医院系统可正常访问——疑似账号侧问题。"
+        diag = "连通性探测：医院系统当前可以访问。"
     await notify_user_and_admin(
         f"❌签到失败｜{user.nickname}｜{_period_label(period)}",
-        f"{reason}\n已尝试 {attempts} 次，签到窗口即将关闭，请立即人工签到。\n{diag}",
+        f"{reason}\n已尝试 {attempts} 次，签到窗口即将关闭，请尽快人工签到。\n{diag}",
         user.sendkey)
 
 
@@ -192,12 +204,52 @@ async def push_manual_result(user: models.User, period: str, outcome: SignOutcom
         sendkey=user.sendkey)  # 无个人 SendKey 时回落管理员 key，保证必达
 
 
+async def _probe_gate(record: bool):
+    """重试循环的轻量门控探测：匿名探端口、不登录。
+
+    多账号重试循环并行门控时共享缓存（ttl 240s，与重试节奏匹配）；DB 模式
+    下新鲜结果落库供热力图——故障期间热力图因此变密，正是最需要它的时刻。"""
+    on_fresh = None
+    if record:
+        on_fresh = lambda p: models.record_probe(  # noqa: E731
+            p.ok, p.latency_ms, p.detail, p.channel)
+    return await probe_cached(ttl=240, on_fresh=on_fresh)
+
+
+async def _broadcast_outage_cancel(user: models.User, period: str, detail: str,
+                                   broadcast: bool) -> None:
+    """连红取消的通知。服务器版多账号并行取消时只广播一次（首个判定的循环
+    负责，settings 原子占位去重）；个人版只推本人。"""
+    label = _period_label(period)
+    if not broadcast:
+        if user.sendkey:
+            await notify(f"🚫自动签到取消｜{user.nickname}｜{label}",
+                         f"医院系统持续无法访问（{detail}），本轮自动签到已取消，"
+                         "请自行留意考勤。", sendkey=user.sendkey)
+        return
+    today = datetime.now(TZ).strftime("%Y-%m-%d")
+    if not models.set_setting_if_absent(f"outage_notified:{today}:{period}", "1"):
+        return  # 已有其他账号的循环广播过
+    await notify(f"🚫医院系统持续无法访问｜{label}",
+                 f"多次探测均失败（{detail}），本轮自动签到已全部取消。"
+                 "请留意考勤，必要时人工签到。")
+    for u in models.list_users():
+        if u.enabled and u.sendkey:
+            await notify(f"🚫自动签到取消｜{label}",
+                         "医院系统持续无法访问，本轮自动签到已取消，请自行完成签到。",
+                         sendkey=u.sendkey)
+
+
 async def sign_user_with_retry(
     user: models.User,
     period: str,
     log_fn: "LogFn | None" = None,
 ) -> SignOutcome:
     """带重试的签到：成功/终态即停；可重试失败每 5 分钟重跑、不限次数，打到停止时间推最终告警。
+
+    故障门控：可重试失败后先探测一次，不可达则转入守候模式（只探不打），
+    连红 RED_STREAK_CANCEL 次取消本轮；恢复即刻回到正常登录流程。
+    管理员手动取消标记每轮检查，点上立即生效。
 
     log_fn(user_id, date, period, result, message)：日志落库回调，
     默认写 SQLite；个人版传入文件日志即可脱离数据库运行。
@@ -206,10 +258,44 @@ async def sign_user_with_retry(
     if log_fn is None:
         log_fn = lambda uid, date, p, result, msg: models.add_log(uid, date, p, result, msg)  # noqa: E731
     today = datetime.now(TZ).strftime("%Y-%m-%d")
-    attempts = 1
+    attempts = 0
+    red_streak = 0
 
     while True:
+        if record_attempts and models.get_setting(skip_key(today, period)):
+            msg = "管理员取消了本轮签到"
+            log_fn(user.id, today, period, RESULT_SKIPPED, msg)
+            return SignOutcome(RESULT_SKIPPED, msg)
+
+        if red_streak:
+            # 守候模式：持续故障期间只探端口不打登录链路，恢复即刻继续
+            p = await _probe_gate(record_attempts)
+            if p.ok:
+                log.info("探测恢复，退出守候继续签到 user=%s period=%s",
+                         user.account, period)
+                red_streak = 0
+            else:
+                red_streak += 1
+                log.info("门控探测连续失败 %d 次 user=%s period=%s: %s",
+                         red_streak, user.account, period, p.detail)
+                if red_streak >= RED_STREAK_CANCEL:
+                    msg = (f"医院系统持续无法访问（连续 {red_streak} 次探测失败），"
+                           "本轮自动签到取消")
+                    log_fn(user.id, today, period, RESULT_FAILED, msg)
+                    await _broadcast_outage_cancel(user, period, p.detail,
+                                                   broadcast=record_attempts)
+                    return SignOutcome(RESULT_FAILED, msg)
+                if datetime.now(TZ).time() >= STOP_TIME[period]:
+                    log_fn(user.id, today, period, RESULT_FAILED,
+                           f"窗口关闭（已尝试 {attempts} 次）: 医院系统持续无法访问")
+                    await push_final_failure(user, period, "医院系统持续无法访问",
+                                             attempts)
+                    return SignOutcome(RESULT_FAILED, "窗口关闭：医院系统持续无法访问")
+                await asyncio.sleep(RETRY_INTERVAL + random.uniform(-60, 60))
+                continue
+
         outcome = await sign_user_once(user, period)
+        attempts += 1
         if record_attempts:
             # 逐轮落库（场次/轮次/出口节点/结果）。落库失败不能影响签到本身
             try:
@@ -245,9 +331,16 @@ async def sign_user_with_retry(
             await push_final_failure(user, period, outcome.message, attempts)
             return outcome
 
+        # 门控：失败原因可能是平台侧持续故障，探一次决定下一拍继续打还是转入守候。
+        # 代理节点坏相等瞬态故障下探针也会红一次，但其重测换节点会顺带完成自愈，
+        # 下一轮即转绿，不影响打满全场。
+        p = await _probe_gate(record_attempts)
+        if not p.ok:
+            red_streak = 1
+            log.info("门控探测不可达，转入守候 user=%s period=%s: %s",
+                     user.account, period, p.detail)
         log.info("签到失败将重试（第 %d 次）user=%s period=%s: %s",
                  attempts + 1, user.account, period, outcome.message)
-        attempts += 1
         # 拟人化：重试间隔 5 分钟 ±1 分钟随机
         await asyncio.sleep(RETRY_INTERVAL + random.uniform(-60, 60))
 
@@ -276,11 +369,16 @@ async def _sign_one(user: models.User, period: str) -> None:
 
 
 async def _preflight(period: str) -> bool:
-    """赛前探针：双通道探测（测量 + 出口调整 + 落库），不可达则 20 秒后复核再放弃整轮。
+    """赛前守卫：管理员取消标记 → 双端口探测（不可达则 20 秒复核），任一不通过放弃整轮。
 
-    通知管理员（含诊断详情）+ 广播所有配了 SendKey 的启用用户（精简指引），
-    避免系统故障日出现不知情缺勤。复核防止单次抖动误杀整轮。
+    探测失败时通知管理员（含诊断详情）+ 广播所有配了 SendKey 的启用用户
+    （精简指引），避免系统故障日出现不知情缺勤。复核防止单次抖动误杀整轮。
     """
+    today = datetime.now(TZ).strftime("%Y-%m-%d")
+    label = f"{datetime.now(TZ).strftime('%m-%d')} {PERIOD_NAME[period]}"
+    if models.get_setting(skip_key(today, period)):
+        log.info("%s 场次已被管理员手动取消，本轮签到跳过", f"{today}-{period}")
+        return False
     first = await probe()
     models.record_probe(first.ok, first.latency_ms, first.detail, first.channel)
     if first.ok:
@@ -292,14 +390,13 @@ async def _preflight(period: str) -> bool:
     if second.ok:
         return True
     log.warning("赛前探测复核仍失败（%s），本轮签到放弃", second.detail)
-    label = f"{datetime.now(TZ).strftime('%m-%d')} {PERIOD_NAME[period]}"
-    await notify(f"🚨医院系统不可达｜{label}",
-                 f"签到前探测连续失败（{second.detail}），本轮签到未执行。\n"
-                 "当前网络出口疑似被医院防火墙拦截，请换手机流量人工签到。")
+    await notify(f"🚫医院系统暂时无法访问｜{label}",
+                 f"签到前探测连续失败（{second.detail}），本轮自动签到未执行。\n"
+                 "请留意考勤，必要时人工签到。")
     for u in models.list_users():
         if u.enabled and u.sendkey:
-            await notify(f"🚨自动签到取消｜{label}",
-                         "本轮自动签到因网络问题取消，请在企微自行完成。",
+            await notify(f"🚫自动签到取消｜{label}",
+                         "医院系统暂时无法访问，本轮自动签到已取消，请自行完成签到。",
                          sendkey=u.sendkey)
     return False
 

@@ -16,6 +16,16 @@ async def _ok_probe(timeout=8.0, switch_on_fail=True):
     return ProbeResult(True, "HTTP 200", 10)
 
 
+async def _ok_gate(ttl=240.0, on_fresh=None):
+    """门控探针假：始终可达。"""
+    return ProbeResult(True, "认证 10ms；考勤 20ms", 20)
+
+
+async def _red_gate(ttl=240.0, on_fresh=None):
+    """门控探针假：持续不可达（模拟医院关闭考勤端口）。"""
+    return ProbeResult(False, "认证 450ms；考勤超时；全量重测无可用节点", 0)
+
+
 def test_find_target_row():
     rows = [_row(rid=1), _row(time_name="下午", rid=2)]
     assert signer.find_target_row(rows, "2026-09-11", "am")["ID"] == 1
@@ -155,6 +165,7 @@ def test_retry_unbounded_until_stop_time(monkeypatch):
 
     monkeypatch.setattr(signer, "sign_user_once", fake_once)
     monkeypatch.setattr(signer, "push_final_failure", fake_push)
+    monkeypatch.setattr(signer, "probe_cached", _ok_gate)  # 门控始终绿，不影响重试
     monkeypatch.setattr(signer, "RETRY_INTERVAL", -100)  # sleep 负值立即返回
     monkeypatch.setattr(signer, "STOP_TIME", {"am": time(23, 59), "pm": time(23, 59)})
     monkeypatch.setattr(signer.random, "uniform", lambda lo, hi: 0)
@@ -166,13 +177,104 @@ def test_retry_unbounded_until_stop_time(monkeypatch):
     assert "push:12" in calls
 
 
+def test_retry_enters_watch_and_cancels_after_red_streak(monkeypatch):
+    """持续故障（门控探针连红）：只打一次登录链路即转入守候，连红 8 次取消本轮。"""
+    calls = []
+
+    async def fake_once(user, period):
+        calls.append("try")
+        return signer.SignOutcome(signer.RESULT_FAILED,
+                                  "考勤系统会话交换网络错误: ConnectTimeout",
+                                  retryable=True)
+
+    pushed = []
+
+    async def fake_notify(title, msg, sendkey=None):
+        pushed.append((title, sendkey))
+
+    monkeypatch.setattr(signer, "sign_user_once", fake_once)
+    monkeypatch.setattr(signer, "probe_cached", _red_gate)
+    monkeypatch.setattr(signer, "notify", fake_notify)
+    monkeypatch.setattr(signer, "RETRY_INTERVAL", -100)
+    monkeypatch.setattr(signer, "STOP_TIME", {"am": time(23, 59), "pm": time(23, 59)})
+    monkeypatch.setattr(signer.random, "uniform", lambda lo, hi: 0)
+
+    user = _user(1, "a")
+    user.sendkey = "SCTxxx"
+    outcome = asyncio.run(signer.sign_user_with_retry(user, "am", log_fn=lambda *a: None))
+    assert outcome.result == signer.RESULT_FAILED
+    assert "持续无法访问" in outcome.message
+    assert calls.count("try") == 1  # 只打了首次登录，之后全部守候
+    # 个人版模式：只推本人，标题带“自动签到取消”
+    assert len(pushed) == 1 and "自动签到取消" in pushed[0][0]
+    assert pushed[0][1] == "SCTxxx"
+
+
+def test_retry_watch_recovers_and_signs(monkeypatch):
+    """守候期间探测转绿：退出守候恢复正常签到流程。"""
+    tries = []
+
+    async def fake_once(user, period):
+        tries.append(1)
+        if len(tries) == 1:
+            return signer.SignOutcome(signer.RESULT_FAILED, "SSO 网络错误: 502",
+                                      retryable=True)
+        return signer.SignOutcome(signer.RESULT_SUCCESS, "签到成功")
+
+    gates = []
+
+    async def flaky_gate(ttl=240.0, on_fresh=None):
+        gates.append(1)
+        if len(gates) == 1:
+            return ProbeResult(False, "认证不通；考勤不通", 0)
+        return ProbeResult(True, "认证 10ms；考勤 20ms", 20)
+
+    async def fake_push(user, period):
+        pass
+
+    monkeypatch.setattr(signer, "sign_user_once", fake_once)
+    monkeypatch.setattr(signer, "probe_cached", flaky_gate)
+    monkeypatch.setattr(signer, "push_success", fake_push)
+    monkeypatch.setattr(signer, "RETRY_INTERVAL", -100)
+    monkeypatch.setattr(signer, "STOP_TIME", {"am": time(23, 59), "pm": time(23, 59)})
+    monkeypatch.setattr(signer.random, "uniform", lambda lo, hi: 0)
+
+    outcome = asyncio.run(signer.sign_user_with_retry(
+        _user(1, "a"), "am", log_fn=lambda *a: None))
+    assert outcome.result == signer.RESULT_SUCCESS
+    assert len(tries) == 2 and len(gates) == 2
+
+
+def test_admin_skip_flag_stops_retry_loop(monkeypatch, tmp_path):
+    """管理员手动取消标记：DB 模式下重试循环每轮检查，立即以 skipped 收场。"""
+    from app import db
+    object.__setattr__(models.settings, "data_dir", str(tmp_path))
+    db._conn = None
+    db.init()
+    try:
+        from datetime import datetime
+        today = datetime.now(signer.TZ).strftime("%Y-%m-%d")
+        models.set_setting(signer.skip_key(today, "am"), "1")
+
+        async def fake_once(user, period):
+            raise AssertionError("已取消的场次不应发起登录")
+
+        monkeypatch.setattr(signer, "sign_user_once", fake_once)
+        outcome = asyncio.run(signer.sign_user_with_retry(_user(1, "a"), "am"))
+        assert outcome.result == signer.RESULT_SKIPPED
+        assert "取消" in outcome.message
+    finally:
+        db._conn = None
+        object.__setattr__(models.settings, "data_dir", "data")
+
+
 def test_sign_all_preflight_aborts_when_unreachable(monkeypatch):
     """赛前探测连续失败 → 整轮放弃：管理员收诊断，配了 SendKey 的启用用户收广播。"""
     probes = []
 
     async def fake_probe(timeout=8.0, switch_on_fail=True):
         probes.append(1)
-        return ProbeResult(False, "连接超时（疑似被防火墙拦截）", 8000)
+        return ProbeResult(False, "认证 450ms；考勤超时", 8000)
 
     async def fake_sleep(seconds):
         pass
@@ -200,7 +302,7 @@ def test_sign_all_preflight_aborts_when_unreachable(monkeypatch):
     asyncio.run(signer.sign_all("pm"))
     assert len(probes) == 2                    # 一次失败 + 一次复核
     assert not signed                          # 未进入账号签到
-    admin_alerts = [t for t, k in pushed if "不可达" in t and k is None]
+    admin_alerts = [t for t, k in pushed if "无法访问" in t and k is None]
     broadcasts = [(t, k) for t, k in pushed if "自动签到取消" in t]
     assert len(admin_alerts) == 1
     assert len(broadcasts) == 1 and broadcasts[0][1] == "SCTxxx"  # 仅启用且有 key 的用户

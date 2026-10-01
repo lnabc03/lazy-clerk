@@ -373,7 +373,8 @@ def probe_heatmap(days: int = 7) -> list[dict]:
     """近 N 天 × 24 小时可及性网格（登录页热力图用）。
 
     返回按日期升序的行列表：{date, cells: [str|None] × 24}，
-    格子为 "direct"（直连正常）/ "proxy"（代理正常）/ "fail" / None（无数据）。
+    格子为 "ok"（双端口可达）/ "fail" / None（无数据）。v0.2 起探针口径
+    是 SSO + 考勤双端口全通，不再区分直连/代理。
     一小时内多次探测取最新一条——手动检测后热力图立即反映当前真实状态。
     """
     cutoff = (datetime.now(TZ) - timedelta(days=days - 1)).strftime("%Y-%m-%d")
@@ -382,9 +383,7 @@ def probe_heatmap(days: int = 7) -> list[dict]:
         (cutoff,)).fetchall()
 
     def state(row) -> str:
-        if not row["ok"]:
-            return "fail"
-        return row["channel"] if row["channel"] in ("direct", "proxy") else "direct"
+        return "ok" if row["ok"] else "fail"
 
     grid: dict[str, dict[int, str]] = {}
     for r in rows:  # 按时间升序，后到者覆盖，小时内最新一条生效
@@ -419,3 +418,26 @@ def set_setting(key: str, value: str) -> None:
         (key, value),
     )
     conn().commit()
+
+
+def set_setting_if_absent(key: str, value: str) -> bool:
+    """键不存在才写入（并发占位去重）。返回是否由本次调用写入。"""
+    cur = conn().execute(
+        "INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)", (key, value))
+    conn().commit()
+    return cur.rowcount > 0
+
+
+def delete_setting(key: str) -> None:
+    conn().execute("DELETE FROM settings WHERE key=?", (key,))
+    conn().commit()
+
+
+def cleanup_skip_flags() -> int:
+    """清理过期的手动取消标记（skip_sign: 键含日期，昨天及以前的删掉）。"""
+    today = datetime.now(TZ).strftime("%Y-%m-%d")
+    cur = conn().execute(
+        "DELETE FROM settings WHERE key LIKE 'skip_sign:%' AND key < ?",
+        (f"skip_sign:{today}",))
+    conn().commit()
+    return cur.rowcount

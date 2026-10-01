@@ -1,4 +1,4 @@
-"""可及性热力图聚合逻辑单测：direct/proxy/fail 三态与小时内最新生效。"""
+"""可及性热力图聚合逻辑单测：ok/fail 两态与小时内最新生效。"""
 import sqlite3
 from datetime import datetime
 
@@ -27,19 +27,19 @@ def _insert(hour: int, ok: bool, channel: str, date: str, minute: int = 7):
     db.conn().commit()
 
 
-def test_heatmap_three_states(tmp_path):
+def test_heatmap_two_states(tmp_path):
     _use_tmp_db(tmp_path)
     try:
         today = datetime.now(models.TZ).strftime("%Y-%m-%d")
-        _insert(6, True, "direct", today)
-        _insert(7, True, "proxy", today)
-        _insert(8, False, "direct", today)
+        _insert(6, True, "proxy", today)
+        _insert(7, True, "direct", today)   # 存量 direct 记录同样归并到 ok
+        _insert(8, False, "proxy", today)
         # 9 点混合：先失败（自动探测）后成功（手动检测）——最新一条生效，标绿
-        _insert(9, False, "direct", today, minute=7)
-        _insert(9, True, "direct", today, minute=40)
+        _insert(9, False, "proxy", today, minute=7)
+        _insert(9, True, "proxy", today, minute=40)
         # 10 点混合：先成功后失败——最新一条是失败，标红
-        _insert(10, True, "direct", today, minute=7)
-        _insert(10, False, "direct", today, minute=50)
+        _insert(10, True, "proxy", today, minute=7)
+        _insert(10, False, "proxy", today, minute=50)
 
         probe_row_today = None
         for row in models.probe_heatmap(days=7):
@@ -47,12 +47,12 @@ def test_heatmap_three_states(tmp_path):
                 probe_row_today = row
         assert probe_row_today is not None
         cells = probe_row_today["cells"]
-        assert cells[6] == "direct"
-        assert cells[7] == "proxy"
+        assert cells[6] == "ok"
+        assert cells[7] == "ok"
         assert cells[8] == "fail"
-        assert cells[9] == "direct"  # 手动检测成功覆盖整点失败
-        assert cells[10] == "fail"   # 最新一条是失败
-        assert cells[11] is None     # 无数据
+        assert cells[9] == "ok"    # 手动检测成功覆盖整点失败
+        assert cells[10] == "fail"  # 最新一条是失败
+        assert cells[11] is None    # 无数据
         assert len(cells) == 24
     finally:
         _restore_db()
@@ -88,7 +88,7 @@ def test_old_db_migrates_channel_column(tmp_path):
         _restore_db()
 
 
-# ---------- probe() 双通道逻辑：直连/代理各测一次，按结果调整出口 ----------
+# ---------- probe() 探针逻辑：代理单通道双端口；判红前全量重测换节点 ----------
 
 import asyncio  # noqa: E402
 
@@ -110,9 +110,10 @@ async def _fake(value):
     return value
 
 
-def _patch_channels(monkeypatch, direct, proxy, retest=(None, ""), current="direct"):
-    """mock 四条外部依赖：直连结果、代理当前节点结果、全量重测结果、当前出口。"""
-    monkeypatch.setattr(client, "_probe_direct", lambda t=8.0: _fake(direct))
+def _patch_channels(monkeypatch, proxy, retest=(None, ""), current="proxy"):
+    """mock 三条外部依赖：钉住节点双端口结果、全量重测结果、当前出口。
+
+    proxy: (综合延迟ms|None, 节点名, 明细)；retest: (延迟ms|None, 节点名)。"""
     monkeypatch.setattr(client, "_probe_proxy", lambda t=8.0: _fake(proxy))
     monkeypatch.setattr(client, "_proxy_group_retest", lambda t=8.0: _fake(retest))
     monkeypatch.setattr(client, "current_channel", lambda: _fake(current))
@@ -125,90 +126,89 @@ def _patch_switch(monkeypatch, calls: list):
     monkeypatch.setattr(client, "mihomo_switch", _switch)
 
 
-def test_probe_direct_ok_no_switch(monkeypatch):
-    """直连通且已在直连出口：标 direct，不触发任何切换。"""
+def test_probe_proxy_ok_no_switch(monkeypatch):
+    """钉住节点双端口可达且出口已在代理：标 ok，不触发任何切换。"""
     _proxy_on()
     try:
-        _patch_channels(monkeypatch, direct=(True, 10, "正常"), proxy=(561, "节点A"))
+        _patch_channels(monkeypatch,
+                        proxy=(561, "节点A", "认证 561ms；考勤 600ms（节点A）"))
         calls = []
         _patch_switch(monkeypatch, calls)
         r = asyncio.run(client.probe())
-        assert r.ok and r.channel == "direct" and r.latency_ms == 10
-        assert "561ms" in r.detail  # 代理通道状态也呈现在摘要里
+        assert r.ok and r.channel == "proxy" and r.latency_ms == 561
+        assert "考勤 600ms" in r.detail
         assert calls == []
     finally:
         _proxy_off()
 
 
-def test_probe_direct_recovers_switches_back(monkeypatch):
-    """直连恢复（当前挂在代理上）：自动切回 DIRECT。"""
+def test_probe_proxy_ok_repins_exit(monkeypatch):
+    """双端口可达但出口挂在 DIRECT（如 mihomo 重启后回默认）：拨回钉住组。"""
     _proxy_on()
     try:
-        _patch_channels(monkeypatch, direct=(True, 10, "正常"), proxy=(561, "节点A"),
-                        current="proxy")
+        _patch_channels(monkeypatch,
+                        proxy=(561, "节点A", "认证 561ms；考勤 600ms（节点A）"),
+                        current="direct")
         calls = []
         _patch_switch(monkeypatch, calls)
         r = asyncio.run(client.probe())
-        assert r.ok and r.channel == "direct"
-        assert calls == ["DIRECT"]
-    finally:
-        _proxy_off()
-
-
-def test_probe_direct_fail_proxy_rescues(monkeypatch):
-    """直连被封、代理当前节点可用：切代理，标 proxy。"""
-    _proxy_on()
-    try:
-        _patch_channels(monkeypatch, direct=(False, 8000, "超时（疑似被防火墙拦截）"),
-                        proxy=(561, "节点A"))
-        calls = []
-        _patch_switch(monkeypatch, calls)
-        r = asyncio.run(client.probe())
-        assert r.ok and r.channel == "proxy" and r.latency_ms == 561
+        assert r.ok and r.channel == "proxy"
         assert calls == [f"{settings.proxy_group}-pin"]
-        assert "节点A" in r.detail
     finally:
         _proxy_off()
 
 
 def test_probe_node_dead_retest_rescues(monkeypatch):
-    """直连被封且代理当前节点也死：全量重测找到可用节点 → 切代理（即时自愈）。"""
+    """钉住节点有端口不通：全量重测找到双端口都通的节点 → 可达（即时自愈）。"""
     _proxy_on()
     try:
-        _patch_channels(monkeypatch, direct=(False, 8000, "超时（疑似被防火墙拦截）"),
-                        proxy=(None, "死节点"), retest=(489, "节点B"))
+        _patch_channels(monkeypatch,
+                        proxy=(None, "死节点", "认证 561ms；考勤不通（死节点）"),
+                        retest=(489, "节点B"))
         calls = []
         _patch_switch(monkeypatch, calls)
         r = asyncio.run(client.probe())
         assert r.ok and r.channel == "proxy" and r.latency_ms == 489
-        assert calls == [f"{settings.proxy_group}-pin"]
         assert "节点B" in r.detail
     finally:
         _proxy_off()
 
 
-def test_probe_both_fail_is_down_no_switch(monkeypatch):
-    """双通道全灭（全量重测也无可用节点）：判不可达，维持现状不切换。"""
+def test_probe_retest_empty_is_down_no_switch(monkeypatch):
+    """钉住节点不通且全量重测也无可用节点：判不可达，维持现状不切换。"""
     _proxy_on()
     try:
-        _patch_channels(monkeypatch, direct=(False, 8000, "超时（疑似被防火墙拦截）"),
-                        proxy=(None, "死节点"), retest=(None, ""), current="proxy")
+        _patch_channels(monkeypatch,
+                        proxy=(None, "死节点", "认证不通；考勤不通（死节点）"),
+                        retest=(None, ""))
         calls = []
         _patch_switch(monkeypatch, calls)
         r = asyncio.run(client.probe())
-        assert not r.ok and r.channel == "proxy"  # channel 记录当前出口
+        assert not r.ok and r.channel == "proxy"
+        assert "全量重测无可用节点" in r.detail
         assert calls == []
     finally:
         _proxy_off()
 
 
 def test_probe_no_proxy_direct_only(monkeypatch):
-    """未配置代理：只测直连，代理通道函数不应被调用。"""
+    """未配置代理（个人版/宿舍版）：只测直连双端口，代理通道函数不应被调用。"""
     _proxy_off()
     monkeypatch.setattr(client, "_probe_direct",
-                        lambda t=8.0: _fake((False, 8000, "超时（疑似被防火墙拦截）")))
+                        lambda t=8.0: _fake((False, 8000, "认证 450ms；考勤超时")))
     async def _boom(t=8.0):  # pragma: no cover - 不应被调用
         raise AssertionError("未配置代理不应测代理通道")
     monkeypatch.setattr(client, "_probe_proxy", _boom)
     r = asyncio.run(client.probe())
     assert not r.ok and r.channel == "direct"
+    assert "考勤超时" in r.detail
+
+
+def test_set_setting_if_absent_dedupes(tmp_path):
+    """连红取消广播的并发占位去重：只有首个写入者拿到 True。"""
+    _use_tmp_db(tmp_path)
+    try:
+        assert models.set_setting_if_absent("outage_notified:2026-10-01:am", "1") is True
+        assert models.set_setting_if_absent("outage_notified:2026-10-01:am", "1") is False
+    finally:
+        _restore_db()
