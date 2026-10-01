@@ -212,3 +212,155 @@ def test_set_setting_if_absent_dedupes(tmp_path):
         assert models.set_setting_if_absent("outage_notified:2026-10-01:am", "1") is False
     finally:
         _restore_db()
+
+
+def test_cleanup_skip_flags(tmp_path):
+    """过期手动取消标记只清昨天及以前的，今天的保留。"""
+    _use_tmp_db(tmp_path)
+    try:
+        today = datetime.now(models.TZ).strftime("%Y-%m-%d")
+        models.set_setting(f"skip_sign:{today}:am", "1")
+        models.set_setting("skip_sign:2020-01-01:am", "1")
+        models.set_setting("skip_sign:2020-01-01:pm", "1")
+        models.set_setting("probe_last_state", "up")  # 其他键不受影响
+        assert models.cleanup_skip_flags() == 2
+        assert models.get_setting(f"skip_sign:{today}:am") == "1"
+        assert models.get_setting("skip_sign:2020-01-01:am") is None
+        assert models.get_setting("probe_last_state") == "up"
+    finally:
+        _restore_db()
+
+
+# ---------- _probe_direct 真实 HTTP 双端口（本地服务器） ----------
+
+import threading  # noqa: E402
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
+
+
+class _Handler(BaseHTTPRequestHandler):
+    status = 200
+
+    def do_GET(self):
+        self.send_response(self.status)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, *a):
+        pass
+
+
+def _serve(status=200) -> ThreadingHTTPServer:
+    handler = type("H", (_Handler,), {"status": status})
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def _port(srv) -> str:
+    return f"http://127.0.0.1:{srv.server_address[1]}"
+
+
+def test_probe_direct_both_ports_alive(monkeypatch):
+    sso, att = _serve(200), _serve(200)
+    try:
+        monkeypatch.setattr(client, "SSO_BASE", _port(sso))
+        monkeypatch.setattr(client, "ATT_BASE", _port(att))
+        ok, ms, detail = asyncio.run(client._probe_direct(5.0))
+        assert ok and "认证" in detail and "考勤" in detail
+    finally:
+        sso.shutdown()
+        att.shutdown()
+
+
+def test_probe_direct_att_down_reports_layer(monkeypatch):
+    """考勤端口关闭（SSO 正常）：判不可达，明细点名是考勤层——2026-10-01 事故形态。"""
+    sso = _serve(200)
+    dead = _serve(200)
+    dead_port = _port(dead)
+    dead.shutdown()  # 立即关停 → 连接拒绝
+    try:
+        monkeypatch.setattr(client, "SSO_BASE", _port(sso))
+        monkeypatch.setattr(client, "ATT_BASE", dead_port)
+        ok, ms, detail = asyncio.run(client._probe_direct(5.0))
+        assert not ok
+        assert "认证" in detail.split("；")[0] and "ms" in detail.split("；")[0]
+        assert "考勤" in detail.split("；")[1] and "ms" not in detail.split("；")[1]
+    finally:
+        sso.shutdown()
+
+
+def test_probe_direct_5xx_down_4xx_alive(monkeypatch):
+    """5xx 算端口不通；4xx/302 等任何非 5xx 响应都算端口活着。"""
+    s500, s404, s200 = _serve(500), _serve(404), _serve(200)
+    try:
+        monkeypatch.setattr(client, "SSO_BASE", _port(s500))
+        monkeypatch.setattr(client, "ATT_BASE", _port(s200))
+        ok, _, detail = asyncio.run(client._probe_direct(5.0))
+        assert not ok and "500" in detail
+        monkeypatch.setattr(client, "SSO_BASE", _port(s404))
+        ok, _, _ = asyncio.run(client._probe_direct(5.0))
+        assert ok
+    finally:
+        s500.shutdown()
+        s404.shutdown()
+        s200.shutdown()
+
+
+# ---------- _proxy_group_retest 两阶段选点 ----------
+
+def _fake_mihomo(monkeypatch, sso_delays, att_delays, put_calls):
+    """sso_delays: group delay 返回值；att_delays: 单节点考勤复验值（None=不通）。"""
+    class R:
+        def __init__(self, code, data):
+            self.status_code, self._d = code, data
+
+        def json(self):
+            return self._d
+
+    async def fake_get(c, path, **kw):
+        if path.startswith("/group/"):
+            return R(200, sso_delays)
+        name = path.split("/")[2]
+        d = att_delays.get(name)
+        return R(200, {"delay": d}) if d else R(408, {})
+
+    async def fake_put(c, path, name):
+        put_calls.append(name)
+
+        class P:
+            status_code = 204
+        return P()
+
+    monkeypatch.setattr(client, "_mihomo_get", fake_get)
+    monkeypatch.setattr(client, "_mihomo_put", fake_put)
+
+
+def test_group_retest_skips_node_with_att_closed(monkeypatch):
+    """SSO 最快但考勤不通的节点要被跳过，钉两端口都通且最差延迟最小者。"""
+    puts = []
+    _fake_mihomo(monkeypatch,
+                 sso_delays={"快节点": 100, "中节点": 200, "慢节点": 300, "坏节点": "x"},
+                 att_delays={"快节点": None, "中节点": 250, "慢节点": 320},
+                 put_calls=puts)
+    ms, node = asyncio.run(client._proxy_group_retest(5.0))
+    assert node == "中节点" and ms == 250
+    assert puts == ["中节点"]
+
+
+def test_group_retest_no_dual_port_node_returns_none(monkeypatch):
+    """全池考勤端口都不通（医院关闭考勤端口的真实形态）：不钉选，报无可用节点。"""
+    puts = []
+    _fake_mihomo(monkeypatch,
+                 sso_delays={"节点A": 100, "节点B": 200},
+                 att_delays={"节点A": None, "节点B": None},
+                 put_calls=puts)
+    ms, node = asyncio.run(client._proxy_group_retest(5.0))
+    assert ms is None and node == "" and puts == []
+
+
+# ---------- _fmt_exc：超时异常空消息补类型名 ----------
+
+def test_fmt_exc_fills_empty_timeout_message():
+    import httpx
+    assert client._fmt_exc(httpx.ConnectTimeout("")) == "ConnectTimeout"
+    assert "ConnectError" in client._fmt_exc(httpx.ConnectError(" refused"))

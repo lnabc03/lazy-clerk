@@ -112,6 +112,35 @@ def test_session_analysis_rounds_pace_nodes(tmp_path):
         _restore_db()
 
 
+def test_session_analysis_cancelled_round(tmp_path):
+    """取消场次：日志分析显示「本轮取消」名单，不计失败、不计成功。
+
+    覆盖两条路径：逐轮数据（连红取消/进行中管理员取消）与 sign_logs 回落
+    （赛前守卫取消：只有终态日志，无 attempts）。
+    """
+    _use_tmp_db(tmp_path)
+    try:
+        u1 = models.create_user("甲", "1001", "pw", None)
+        u2 = models.create_user("乙", "1002", "pw", None)
+        # 今天 am：甲第 1 轮成功，乙第 1 轮失败后被管理员取消（终态 cancelled）
+        _attempt(u1, _day(0), "am", 1, "success", "节点A")
+        _attempt(u2, _day(0), "am", 1, "failed", "节点A", "考勤系统会话交换网络错误")
+        _log(u2, _day(0), "am", "cancelled", "管理员取消了本轮签到")
+        # 今天 pm：赛前守卫取消，只有 cancelled 终态日志（无 attempts）
+        _log(u1, _day(0), "pm", "cancelled", "赛前探测连续失败，本轮签到未执行")
+        _log(u2, _day(0), "pm", "cancelled", "赛前探测连续失败，本轮签到未执行")
+        out = {s["run_id"]: s for s in models.session_analysis(days=7)}
+        # am：乙的 attempts 终态是 failed，但 sign_logs 权威终态是 cancelled
+        # （管理员中途取消）→ 必须归入取消名单，不能误报为失败
+        am = out[f"{_day(0)}-am"]
+        assert am["ok"] == 1 and am["cancelled"] == ["乙"] and not am["failed"]
+        # pm：赛前守卫取消（只有终态日志，无 attempts）→ 全员本轮取消
+        pm = out[f"{_day(0)}-pm"]
+        assert pm["cancelled"] == ["甲", "乙"]
+        assert not pm["failed"] and pm["ok"] == 0
+    finally:
+        _restore_db()
+
 def test_session_analysis_final_failure_and_fallback(tmp_path):
     _use_tmp_db(tmp_path)
     try:

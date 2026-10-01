@@ -244,6 +244,8 @@ def service_summary() -> dict:
             continue
         d = days.setdefault(r["date"], {"periods": set(), "failed": False})
         d["periods"].add(r["period"])
+        # cancelled（本轮取消）不是系统失败：医院关闭时正确取消恰是稳定行为，
+        # 不置 failed、正常计入时段，不中断稳定日
         if r["result"] == "failed":
             d["failed"] = True
 
@@ -285,6 +287,17 @@ def session_analysis(days: int = 7) -> list[dict]:
             (cutoff,)).fetchall():
         sessions.setdefault(r["run_id"], []).append(r)
 
+    # 终态口径：sign_logs 是每账号每场的权威终态（成功/失败/取消），attempts
+    # 只是逐轮过程证据。连红取消/管理员中途取消时最后一轮 attempt 仍是 failed，
+    # 只有 sign_logs 记着 cancelled——终态分类必须优先看 sign_logs，否则取消
+    # 场次会被误报为「X 人失败」。
+    terminal: dict[str, dict[int, sqlite3.Row]] = {}
+    for r in conn().execute(
+            "SELECT * FROM sign_logs WHERE date>=? ORDER BY id", (cutoff,)).fetchall():
+        if (r["message"] or "").startswith(_NON_AUTO_PREFIX):
+            continue
+        terminal.setdefault(f'{r["date"]}-{r["period"]}', {})[r["user_id"]] = r  # 后写覆盖 = 终态
+
     out: list[dict] = []
     for rid, attempts in sessions.items():
         by_user: dict[int, list] = {}
@@ -296,13 +309,17 @@ def session_analysis(days: int = 7) -> list[dict]:
         nodes: list[str] = []
         failed: list[dict] = []
         manual: list[str] = []
+        cancelled: list[str] = []
         ok_total = 0
         for uid, atts in by_user.items():
             for a in atts:
                 rd = round_detail[a["round"]]
                 (rd["ok"] if a["result"] in _OK_RESULTS else rd["fail"]).append(name(uid))
             final = atts[-1]
-            if final["result"] in _OK_RESULTS:
+            term = terminal.get(rid, {}).get(uid)
+            res = term["result"] if term is not None else final["result"]
+            msg = (term["message"] if term is not None else final["message"]) or ""
+            if res in _OK_RESULTS:
                 ok_total += 1
                 pace_map[final["round"]] = pace_map.get(final["round"], 0) + 1
                 # 成功出口：优先 success 尝试的节点，全 skipped/no_schedule 的场次
@@ -311,39 +328,37 @@ def session_analysis(days: int = 7) -> list[dict]:
                     nd = strip_node_flag(final["node"])
                     if nd not in nodes:
                         nodes.append(nd)
-            elif final["result"] == "manual":
+            elif res == "manual":
                 manual.append(name(uid))
+            elif res == "cancelled":
+                cancelled.append(name(uid))
             else:
-                failed.append({"name": name(uid), "msg": final["message"] or ""})
+                failed.append({"name": name(uid), "msg": msg})
         out.append({
             "run_id": rid, "date": rid[:10], "period": rid[11:],
             "rounds": rounds, "users": len(by_user), "ok": ok_total,
             "pace": [(k, pace_map[k]) for k in sorted(pace_map)],
             "nodes": nodes,
             "detail": [round_detail[k] for k in range(1, rounds + 1)],
-            "failed": failed, "manual": manual,
+            "failed": failed, "manual": manual, "cancelled": cancelled,
             "failed_title": "；".join(f"{f['name']}: {f['msg']}" for f in failed),
         })
 
-    # 历史回落：sign_logs 有终态但无逐轮数据的场次（逐轮落库上线前的日子）
-    fallback: dict[str, dict] = {}
-    for r in conn().execute(
-            "SELECT * FROM sign_logs WHERE date>=? ORDER BY id", (cutoff,)).fetchall():
-        if (r["message"] or "").startswith(_NON_AUTO_PREFIX):
+    # 历史回落：sign_logs 有终态但无逐轮数据的场次（逐轮落库上线前的日子，
+    # 以及赛前守卫取消的场次——只写终态日志，无 attempts）
+    for rid, finals in terminal.items():
+        if rid in sessions:
             continue
-        rid = f'{r["date"]}-{r["period"]}'
-        if rid not in sessions:
-            fallback.setdefault(rid, {})[r["user_id"]] = r  # 后写覆盖 = 终态
-    for rid, finals in fallback.items():
         failed = [{"name": name(uid), "msg": r["message"] or ""}
                   for uid, r in finals.items() if r["result"] == "failed"]
         manual = [name(uid) for uid, r in finals.items() if r["result"] == "manual"]
+        cancelled = [name(uid) for uid, r in finals.items() if r["result"] == "cancelled"]
         ok = sum(1 for r in finals.values() if r["result"] in _OK_RESULTS)
         out.append({
             "run_id": rid, "date": rid[:10], "period": rid[11:],
             "rounds": None, "users": len(finals), "ok": ok,
             "pace": [], "nodes": [], "detail": [],
-            "failed": failed, "manual": manual,
+            "failed": failed, "manual": manual, "cancelled": cancelled,
             "failed_title": "；".join(f"{f['name']}: {f['msg']}" for f in failed),
         })
 

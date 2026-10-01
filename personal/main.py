@@ -26,6 +26,7 @@ TASK_NAMES = {"am": "lazy-clerk-sign-am", "pm": "lazy-clerk-sign-pm"}
 RESULT_TEXT = {
     "success": "签到成功", "skipped": "已经签过", "no_schedule": "今日此时段无需签到",
     "failed": "签到失败", "manual": "需要人工处理", "sign": "待签到",
+    "cancelled": "本轮已取消",
 }
 
 

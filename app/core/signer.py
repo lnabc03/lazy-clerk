@@ -57,6 +57,7 @@ RESULT_SKIPPED = "skipped"       # 已签过
 RESULT_NO_SCHEDULE = "no_schedule"  # 未排班/休假
 RESULT_MANUAL = "manual"         # 需人工处理（迟到/补签/借假等）
 RESULT_CHECKED = "checked"       # 管理页手动检测（非签到动作）
+RESULT_CANCELLED = "cancelled"   # 本轮取消（连红自动取消 / 管理员手动取消）
 
 # 已签状态；-1 借假＝无需签到；其余非空状态（-3 迟到 / -4 补签待确认 ...）均需人工
 SIGNED = {1, 10}
@@ -192,7 +193,7 @@ async def push_login_failure(user: models.User, period: str, reason: str) -> Non
 
 RESULT_WORD = {
     RESULT_SUCCESS: "签到成功", RESULT_SKIPPED: "已签过", RESULT_NO_SCHEDULE: "无需签到",
-    RESULT_FAILED: "失败", RESULT_MANUAL: "需人工",
+    RESULT_FAILED: "失败", RESULT_MANUAL: "需人工", RESULT_CANCELLED: "本轮取消",
 }
 
 
@@ -264,8 +265,8 @@ async def sign_user_with_retry(
     while True:
         if record_attempts and models.get_setting(skip_key(today, period)):
             msg = "管理员取消了本轮签到"
-            log_fn(user.id, today, period, RESULT_SKIPPED, msg)
-            return SignOutcome(RESULT_SKIPPED, msg)
+            log_fn(user.id, today, period, RESULT_CANCELLED, msg)
+            return SignOutcome(RESULT_CANCELLED, msg)
 
         if red_streak:
             # 守候模式：持续故障期间只探端口不打登录链路，恢复即刻继续
@@ -281,10 +282,10 @@ async def sign_user_with_retry(
                 if red_streak >= RED_STREAK_CANCEL:
                     msg = (f"医院系统持续无法访问（连续 {red_streak} 次探测失败），"
                            "本轮自动签到取消")
-                    log_fn(user.id, today, period, RESULT_FAILED, msg)
+                    log_fn(user.id, today, period, RESULT_CANCELLED, msg)
                     await _broadcast_outage_cancel(user, period, p.detail,
                                                    broadcast=record_attempts)
-                    return SignOutcome(RESULT_FAILED, msg)
+                    return SignOutcome(RESULT_CANCELLED, msg)
                 if datetime.now(TZ).time() >= STOP_TIME[period]:
                     log_fn(user.id, today, period, RESULT_FAILED,
                            f"窗口关闭（已尝试 {attempts} 次）: 医院系统持续无法访问")
@@ -368,6 +369,14 @@ async def _sign_one(user: models.User, period: str) -> None:
         log.exception("账号签到流程崩溃（已隔离）user=%s", user.account)
 
 
+def _log_round_cancelled(today: str, period: str, message: str) -> None:
+    """整轮取消时为每个启用用户写 cancelled 终态日志：账号总览徽标与日志分析
+    才能如实显示「本轮取消」，而不是「—」或被误读为失败/已签过。"""
+    for u in models.list_users():
+        if u.enabled:
+            models.add_log(u.id, today, period, RESULT_CANCELLED, message)
+
+
 async def _preflight(period: str) -> bool:
     """赛前守卫：管理员取消标记 → 双端口探测（不可达则 20 秒复核），任一不通过放弃整轮。
 
@@ -378,6 +387,7 @@ async def _preflight(period: str) -> bool:
     label = f"{datetime.now(TZ).strftime('%m-%d')} {PERIOD_NAME[period]}"
     if models.get_setting(skip_key(today, period)):
         log.info("%s 场次已被管理员手动取消，本轮签到跳过", f"{today}-{period}")
+        _log_round_cancelled(today, period, "管理员取消了本轮签到")
         return False
     first = await probe()
     models.record_probe(first.ok, first.latency_ms, first.detail, first.channel)
@@ -390,6 +400,7 @@ async def _preflight(period: str) -> bool:
     if second.ok:
         return True
     log.warning("赛前探测复核仍失败（%s），本轮签到放弃", second.detail)
+    _log_round_cancelled(today, period, "赛前探测连续失败，本轮签到未执行")
     await notify(f"🚫医院系统暂时无法访问｜{label}",
                  f"签到前探测连续失败（{second.detail}），本轮自动签到未执行。\n"
                  "请留意考勤，必要时人工签到。")

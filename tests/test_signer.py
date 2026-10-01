@@ -202,7 +202,7 @@ def test_retry_enters_watch_and_cancels_after_red_streak(monkeypatch):
     user = _user(1, "a")
     user.sendkey = "SCTxxx"
     outcome = asyncio.run(signer.sign_user_with_retry(user, "am", log_fn=lambda *a: None))
-    assert outcome.result == signer.RESULT_FAILED
+    assert outcome.result == signer.RESULT_CANCELLED
     assert "持续无法访问" in outcome.message
     assert calls.count("try") == 1  # 只打了首次登录，之后全部守候
     # 个人版模式：只推本人，标题带“自动签到取消”
@@ -245,6 +245,42 @@ def test_retry_watch_recovers_and_signs(monkeypatch):
     assert len(tries) == 2 and len(gates) == 2
 
 
+def test_preflight_admin_skip_logs_cancelled(monkeypatch, tmp_path):
+    """管理员提前取消：赛前守卫不探测不打登录，为启用用户写 cancelled 终态日志
+    （账号总览徽标与日志分析才能如实显示「本轮取消」）。"""
+    from app import db
+    object.__setattr__(models.settings, "data_dir", str(tmp_path))
+    db._conn = None
+    db.init()
+    try:
+        from datetime import datetime
+        u1 = models.create_user("甲", "1001", "pw", None)
+        u2 = models.create_user("乙", "1002", "pw", None)
+        models.set_user_enabled(u2, False)
+        today = datetime.now(signer.TZ).strftime("%Y-%m-%d")
+        models.set_setting(signer.skip_key(today, "am"), "1")
+
+        async def _boom(timeout=8.0):
+            raise AssertionError("已取消的场次不应发起探测")
+        monkeypatch.setattr(signer, "probe", _boom)
+
+        signed = []
+
+        async def fake_sign_one(user, period):
+            signed.append(user.account)
+        monkeypatch.setattr(signer, "_sign_one", fake_sign_one)
+
+        asyncio.run(signer.sign_all("am"))
+        assert not signed
+        rows = models.today_results()
+        assert rows[u1]["am"]["result"] == signer.RESULT_CANCELLED
+        assert "取消" in rows[u1]["am"]["message"]
+        assert u2 not in rows  # 停用用户不写
+    finally:
+        db._conn = None
+        object.__setattr__(models.settings, "data_dir", "data")
+
+
 def test_admin_skip_flag_stops_retry_loop(monkeypatch, tmp_path):
     """管理员手动取消标记：DB 模式下重试循环每轮检查，立即以 skipped 收场。"""
     from app import db
@@ -261,7 +297,7 @@ def test_admin_skip_flag_stops_retry_loop(monkeypatch, tmp_path):
 
         monkeypatch.setattr(signer, "sign_user_once", fake_once)
         outcome = asyncio.run(signer.sign_user_with_retry(_user(1, "a"), "am"))
-        assert outcome.result == signer.RESULT_SKIPPED
+        assert outcome.result == signer.RESULT_CANCELLED
         assert "取消" in outcome.message
     finally:
         db._conn = None
