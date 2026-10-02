@@ -216,17 +216,21 @@ def test_set_setting_if_absent_dedupes(tmp_path):
 
 
 def test_cleanup_skip_flags(tmp_path):
-    """过期手动取消标记只清昨天及以前的，今天的保留。"""
+    """过期日期键（skip_sign / round_cancel_notified）只清昨天及以前的，今天的保留。"""
     _use_tmp_db(tmp_path)
     try:
         today = datetime.now(models.TZ).strftime("%Y-%m-%d")
         models.set_setting(f"skip_sign:{today}:am", "1")
+        models.set_setting(f"round_cancel_notified:{today}:pm", "1")
         models.set_setting("skip_sign:2020-01-01:am", "1")
         models.set_setting("skip_sign:2020-01-01:pm", "1")
+        models.set_setting("round_cancel_notified:2020-01-01:am", "1")
         models.set_setting("probe_last_state", "up")  # 其他键不受影响
-        assert models.cleanup_skip_flags() == 2
+        assert models.cleanup_skip_flags() == 3
         assert models.get_setting(f"skip_sign:{today}:am") == "1"
+        assert models.get_setting(f"round_cancel_notified:{today}:pm") == "1"
         assert models.get_setting("skip_sign:2020-01-01:am") is None
+        assert models.get_setting("round_cancel_notified:2020-01-01:am") is None
         assert models.get_setting("probe_last_state") == "up"
     finally:
         _restore_db()

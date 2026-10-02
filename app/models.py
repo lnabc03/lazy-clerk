@@ -496,10 +496,12 @@ def delete_setting(key: str) -> None:
 
 
 def cleanup_skip_flags() -> int:
-    """清理过期的手动取消标记（skip_sign: 键含日期，昨天及以前的删掉）。"""
+    """清理过期的日期作用域 settings 键（昨天及以前）：手动取消标记 skip_sign:
+    与取消广播去重键 round_cancel_notified:（键含日期，过期即无意义）。"""
     today = datetime.now(TZ).strftime("%Y-%m-%d")
     cur = conn().execute(
-        "DELETE FROM settings WHERE key LIKE 'skip_sign:%' AND key < ?",
-        (f"skip_sign:{today}",))
+        "DELETE FROM settings WHERE (key LIKE 'skip_sign:%' AND key < ?)"
+        " OR (key LIKE 'round_cancel_notified:%' AND key < ?)",
+        (f"skip_sign:{today}", f"round_cancel_notified:{today}"))
     conn().commit()
     return cur.rowcount
