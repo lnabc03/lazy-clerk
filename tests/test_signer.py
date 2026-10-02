@@ -304,41 +304,80 @@ def test_admin_skip_flag_stops_retry_loop(monkeypatch, tmp_path):
         object.__setattr__(models.settings, "data_dir", "data")
 
 
-def test_sign_all_preflight_aborts_when_unreachable(monkeypatch):
-    """赛前探测连续失败 → 整轮放弃：管理员收诊断，配了 SendKey 的启用用户收广播。"""
-    probes = []
+def test_sign_all_preflight_aborts_when_unreachable(monkeypatch, tmp_path):
+    """赛前探测连续失败 → 整轮放弃：统一广播出口逐用户通知（每人一条，
+    不再另发管理员诊断版——诊断留在管理页/热力图）。"""
+    from app import db
+    object.__setattr__(models.settings, "data_dir", str(tmp_path))
+    db._conn = None
+    db.init()
+    try:
+        probes = []
 
-    async def fake_probe(timeout=8.0, switch_on_fail=True):
-        probes.append(1)
-        return ProbeResult(False, "认证 450ms；考勤超时", 8000)
+        async def fake_probe(timeout=8.0, switch_on_fail=True):
+            probes.append(1)
+            return ProbeResult(False, "认证 450ms；考勤超时", 8000)
 
-    async def fake_sleep(seconds):
-        pass
+        async def fake_sleep(seconds):
+            pass
 
-    pushed = []
+        pushed = []
 
-    async def fake_notify(title, msg, sendkey=None):
-        pushed.append((title, sendkey))
+        async def fake_notify(title, msg, sendkey=None):
+            pushed.append((title, msg, sendkey))
 
-    users = [_user(1, "with_key"), _user(2, "no_key"), _user(3, "disabled")]
-    users[0].sendkey = "SCTxxx"      # 启用且有 SendKey → 应收广播
-    users[2].enabled = False          # 停用 → 不收
-    monkeypatch.setattr(models, "list_users", lambda: users)
-    monkeypatch.setattr(signer, "probe", fake_probe)
-    monkeypatch.setattr(signer.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(signer, "notify", fake_notify)
+        users = [_user(1, "with_key"), _user(2, "no_key"), _user(3, "disabled")]
+        users[0].sendkey = "SCTxxx"      # 启用且有 SendKey → 应收广播
+        users[2].enabled = False          # 停用 → 不收
+        monkeypatch.setattr(models, "list_users", lambda: users)
+        monkeypatch.setattr(signer, "probe", fake_probe)
+        monkeypatch.setattr(signer.asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(signer, "notify", fake_notify)
 
-    signed = []
+        signed = []
 
-    async def fake_sign_one(user, period):
-        signed.append(user.account)
+        async def fake_sign_one(user, period):
+            signed.append(user.account)
 
-    monkeypatch.setattr(signer, "_sign_one", fake_sign_one)
+        monkeypatch.setattr(signer, "_sign_one", fake_sign_one)
 
-    asyncio.run(signer.sign_all("pm"))
-    assert len(probes) == 2                    # 一次失败 + 一次复核
-    assert not signed                          # 未进入账号签到
-    admin_alerts = [t for t, k in pushed if "无法访问" in t and k is None]
-    broadcasts = [(t, k) for t, k in pushed if "自动签到取消" in t]
-    assert len(admin_alerts) == 1
-    assert len(broadcasts) == 1 and broadcasts[0][1] == "SCTxxx"  # 仅启用且有 key 的用户
+        asyncio.run(signer.sign_all("pm"))
+        assert len(probes) == 2                    # 一次失败 + 一次复核
+        assert not signed                          # 未进入账号签到
+        broadcasts = [(t, m, k) for t, m, k in pushed if "自动签到取消" in t]
+        assert len(broadcasts) == 1 and broadcasts[0][2] == "SCTxxx"  # 仅启用且有 key 的用户
+        assert "医院系统暂时无法访问" in broadcasts[0][1]
+        assert not [t for t, m, k in pushed if "无法访问" in t and k is None]  # 无管理员专属版
+    finally:
+        db._conn = None
+        object.__setattr__(models.settings, "data_dir", "data")
+
+
+def test_broadcast_round_cancelled_dedupes_across_paths(monkeypatch, tmp_path):
+    """统一广播出口：同一场次赛前取消后再手动取消，用户只收一次（原子占位去重）。"""
+    from app import db
+    object.__setattr__(models.settings, "data_dir", str(tmp_path))
+    db._conn = None
+    db.init()
+    try:
+        pushed = []
+
+        async def fake_notify(title, msg, sendkey=None):
+            pushed.append((title, msg, sendkey))
+
+        users = [_user(1, "with_key"), _user(2, "no_key")]
+        users[0].sendkey = "SCTxxx"
+        monkeypatch.setattr(models, "list_users", lambda: users)
+        monkeypatch.setattr(signer, "notify", fake_notify)
+
+        asyncio.run(signer.broadcast_round_cancelled("pm", "医院系统暂时无法访问"))
+        asyncio.run(signer.broadcast_round_cancelled("pm", "管理员手动取消"))
+        assert len(pushed) == 1  # 第二路径被去重
+        assert "医院系统暂时无法访问" in pushed[0][1]
+        assert pushed[0][2] == "SCTxxx"
+        # 换个场次（上午）不受去重影响
+        asyncio.run(signer.broadcast_round_cancelled("am", "管理员手动取消"))
+        assert len(pushed) == 2 and "管理员手动取消" in pushed[1][1]
+    finally:
+        db._conn = None
+        object.__setattr__(models.settings, "data_dir", "data")

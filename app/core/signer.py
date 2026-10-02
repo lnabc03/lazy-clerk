@@ -193,7 +193,7 @@ async def push_login_failure(user: models.User, period: str, reason: str) -> Non
 
 RESULT_WORD = {
     RESULT_SUCCESS: "签到成功", RESULT_SKIPPED: "已签过", RESULT_NO_SCHEDULE: "无需签到",
-    RESULT_FAILED: "失败", RESULT_MANUAL: "需人工", RESULT_CANCELLED: "本轮取消",
+    RESULT_FAILED: "失败", RESULT_MANUAL: "需人工", RESULT_CANCELLED: "取消",
 }
 
 
@@ -218,10 +218,26 @@ async def _probe_gate(record: bool):
     return await probe_cached(ttl=240, on_fresh=on_fresh)
 
 
+async def broadcast_round_cancelled(period: str, cause: str) -> None:
+    """整轮取消的逐用户广播：赛前取消 / 连红取消 / 管理员手动取消的唯一通知出口。
+
+    原子占位去重——同一场次无论哪条路径先判定，用户只收一次（2026-10-02
+    事故：赛前守卫曾同时发管理员诊断版+逐用户广播，一人收两条）。
+    诊断细节不进通知，留在管理页热力图与日志。仅 DB 模式调用。"""
+    today = datetime.now(TZ).strftime("%Y-%m-%d")
+    if not models.set_setting_if_absent(f"round_cancel_notified:{today}:{period}", "1"):
+        return
+    label = _period_label(period)
+    for u in models.list_users():
+        if u.enabled and u.sendkey:
+            await notify(f"🚫自动签到取消｜{label}",
+                         f"{cause}，本轮自动签到已取消，请自行完成签到。",
+                         sendkey=u.sendkey)
+
+
 async def _broadcast_outage_cancel(user: models.User, period: str, detail: str,
                                    broadcast: bool) -> None:
-    """连红取消的通知。服务器版多账号并行取消时只广播一次（首个判定的循环
-    负责，settings 原子占位去重）；个人版只推本人。"""
+    """连红取消的通知。个人版只推本人；服务器版走统一广播出口（原子去重）。"""
     label = _period_label(period)
     if not broadcast:
         if user.sendkey:
@@ -229,17 +245,7 @@ async def _broadcast_outage_cancel(user: models.User, period: str, detail: str,
                          f"医院系统持续无法访问（{detail}），本轮自动签到已取消，"
                          "请自行留意考勤。", sendkey=user.sendkey)
         return
-    today = datetime.now(TZ).strftime("%Y-%m-%d")
-    if not models.set_setting_if_absent(f"outage_notified:{today}:{period}", "1"):
-        return  # 已有其他账号的循环广播过
-    await notify(f"🚫医院系统持续无法访问｜{label}",
-                 f"多次探测均失败（{detail}），本轮自动签到已全部取消。"
-                 "请留意考勤，必要时人工签到。")
-    for u in models.list_users():
-        if u.enabled and u.sendkey:
-            await notify(f"🚫自动签到取消｜{label}",
-                         "医院系统持续无法访问，本轮自动签到已取消，请自行完成签到。",
-                         sendkey=u.sendkey)
+    await broadcast_round_cancelled(period, "医院系统持续无法访问")
 
 
 async def sign_user_with_retry(
@@ -384,7 +390,7 @@ async def _sign_one(user: models.User, period: str) -> None:
 
 def _log_round_cancelled(today: str, period: str, message: str) -> None:
     """整轮取消时为每个启用用户写 cancelled 终态日志：账号总览徽标与日志分析
-    才能如实显示「本轮取消」，而不是「—」或被误读为失败/已签过。"""
+    才能如实显示「取消」，而不是「—」或被误读为失败/已签过。"""
     for u in models.list_users():
         if u.enabled:
             models.add_log(u.id, today, period, RESULT_CANCELLED, message)
@@ -393,11 +399,10 @@ def _log_round_cancelled(today: str, period: str, message: str) -> None:
 async def _preflight(period: str) -> bool:
     """赛前守卫：管理员取消标记 → 双端口探测（不可达则 20 秒复核），任一不通过放弃整轮。
 
-    探测失败时通知管理员（含诊断详情）+ 广播所有配了 SendKey 的启用用户
-    （精简指引），避免系统故障日出现不知情缺勤。复核防止单次抖动误杀整轮。
+    取消整轮时经 broadcast_round_cancelled 统一广播（每人一条，原子去重），
+    避免系统故障日出现不知情缺勤。复核防止单次抖动误杀整轮。
     """
     today = datetime.now(TZ).strftime("%Y-%m-%d")
-    label = f"{datetime.now(TZ).strftime('%m-%d')} {PERIOD_NAME[period]}"
     if models.get_setting(skip_key(today, period)):
         log.info("%s 场次已被管理员手动取消，本轮签到跳过", f"{today}-{period}")
         _log_round_cancelled(today, period, "管理员取消了本轮签到")
@@ -423,14 +428,7 @@ async def _preflight(period: str) -> bool:
         return True
     log.warning("赛前探测复核仍失败（%s），本轮签到放弃", second.detail)
     _log_round_cancelled(today, period, "赛前探测连续失败，本轮签到未执行")
-    await notify(f"🚫医院系统暂时无法访问｜{label}",
-                 f"签到前探测连续失败（{second.detail}），本轮自动签到未执行。\n"
-                 "请留意考勤，必要时人工签到。")
-    for u in models.list_users():
-        if u.enabled and u.sendkey:
-            await notify(f"🚫自动签到取消｜{label}",
-                         "医院系统暂时无法访问，本轮自动签到已取消，请自行完成签到。",
-                         sendkey=u.sendkey)
+    await broadcast_round_cancelled(period, "医院系统暂时无法访问")
     return False
 
 

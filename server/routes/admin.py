@@ -95,8 +95,13 @@ async def sign_skip(request: Request, period: str):
     label = signer.PERIOD_NAME[period]
     if models.get_setting(key):
         models.delete_setting(key)
+        # 恢复后若再次取消，应能再次收到广播（去重键按场次占位，恢复即释放）
+        models.delete_setting(f"round_cancel_notified:{today}:{period}")
         return redirect("/admin", msg=f"已恢复今日{label}签到")
     models.set_setting(key, "1")
+    # 取消即广播（统一出口，与赛前/连红取消原子去重）：手动取消时赛前守卫与
+    # 重试循环都只静默写终态日志，若这里不发通知用户会对缺勤不知情
+    await signer.broadcast_round_cancelled(period, "管理员手动取消")
     return redirect("/admin", msg=f"已取消今日{label}签到（含进行中的重试），次日自动失效")
 
 

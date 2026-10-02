@@ -96,7 +96,7 @@ def mask_sendkey(sendkey: str | None) -> str:
 
 RESULT_LABEL = {
     "success": "成功", "failed": "失败", "skipped": "已签过",
-    "no_schedule": "无需签到", "manual": "需人工", "cancelled": "本轮取消",
+    "no_schedule": "无需签到", "manual": "需人工", "cancelled": "取消",
 }
 RESULT_COLOR = {
     "success": "success", "skipped": "success", "no_schedule": "success",

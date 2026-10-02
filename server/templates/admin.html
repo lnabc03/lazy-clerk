@@ -109,7 +109,7 @@
                     {% elif s.manual %}
                     <span class="badge bg-warning text-dark">⚠️ {{ s.manual|length }} 人需人工</span>
                     {% elif s.cancelled %}
-                    <span class="badge bg-secondary" title="{{ s.cancelled|join('、') }}">🚫 本轮取消{% if s.ok %}（{{ s.ok }}/{{ s.users }} 已签）{% endif %}</span>
+                    <span class="badge bg-secondary" title="{{ s.cancelled|join('、') }}">🚫 取消{% if s.ok %}（{{ s.ok }}/{{ s.users }} 已签）{% endif %}</span>
                     {% else %}
                     <span class="badge bg-success">✅ {{ s.ok }}/{{ s.users }}</span>
                     {% endif %}

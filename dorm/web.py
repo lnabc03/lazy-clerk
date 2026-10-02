@@ -65,11 +65,13 @@ def open_browser_later(url: str = "http://127.0.0.1:8787/admin") -> None:
 PERIOD_TEXT = {"am": "上午", "pm": "下午"}
 LOG_RESULT_TEXT = {
     "success": "成功", "failed": "失败", "skipped": "已签过",
-    "no_schedule": "无需签到", "manual": "需人工", "checked": "检测",
+    "no_schedule": "无需签到", "manual": "需人工", "cancelled": "取消",
+    "checked": "检测",
 }
 LOG_RESULT_COLOR = {
     "success": "success", "skipped": "success", "no_schedule": "success",
-    "failed": "danger", "manual": "warning", "checked": "info",
+    "failed": "danger", "manual": "warning", "cancelled": "secondary",
+    "checked": "info",
 }
 
 

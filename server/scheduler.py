@@ -38,6 +38,17 @@ def _cleanup_logs() -> None:
         log.info("清理过期手动取消标记 %d 个", deleted)
 
 
+def _in_sign_window() -> bool:
+    """当前是否处于签到窗口（含赛前半小时准备期）。
+
+    窗口内的故障由赛前守卫/门控的取消广播覆盖（broadcast_round_cancelled
+    每人一条），定时探测再告警就是同一件事发两条（2026-10-02 上午实测
+    困扰）。静默期状态机照常维护，恢复通知不受影响。"""
+    from datetime import datetime, time as dtime
+    now = datetime.now(models.TZ).time()
+    return (dtime(4, 30) <= now < dtime(8, 30)) or (dtime(12, 30) <= now < dtime(15, 0))
+
+
 async def _probe_job() -> None:
     """每小时双端口探测并落库（登录页热力图数据源）。
 
@@ -68,6 +79,10 @@ async def _probe_job() -> None:
         models.record_probe(p.ok, p.latency_ms, p.detail, p.channel)
         if not p.ok:
             models.set_setting("probe_last_state", "down")
+            if _in_sign_window():
+                # 签到窗口内故障由赛前守卫/门控的取消广播通知，这里只记状态
+                log.info("窗口内探测不可达，跳过告警（取消广播会覆盖）: %s", p.detail)
+                return
             await notify("🚨医院系统暂时无法访问（定时探测）",
                          f"{p.detail}\n"
                          "故障期间的自动签到将自动取消，恢复后会另行通知。")

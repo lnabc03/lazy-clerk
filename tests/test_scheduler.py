@@ -106,3 +106,27 @@ def test_legacy_state_value_treated_as_up(monkeypatch, tmp_path):
         assert models.get_setting("probe_last_state") == "up"
     finally:
         _restore_db()
+
+
+def test_down_alert_suppressed_in_sign_window(monkeypatch, tmp_path):
+    """签到窗口内判红：状态置 down 但不告警（赛前守卫/门控的取消广播负责通知）；
+    窗口外恢复时恢复通知照常。"""
+    _use_tmp_db(tmp_path)
+    try:
+        pushed = []
+        calls = _patch(monkeypatch, [RED, RED], pushed)
+        monkeypatch.setattr(scheduler, "_in_sign_window", lambda: True)
+        asyncio.run(scheduler._probe_job())
+        assert len(calls) == 2  # 初测 + 复核照常
+        assert not pushed       # 窗口内不告警
+        assert models.get_setting("probe_last_state") == "down"
+
+        # 恢复通知不受窗口影响（此处仍在窗口内也应通知——好消息不压）
+        monkeypatch.setattr(scheduler, "_in_sign_window", lambda: False)
+        pushed.clear()
+        _patch(monkeypatch, [OK], pushed)
+        asyncio.run(scheduler._probe_job())
+        assert any("恢复可达" in t for t in pushed)
+        assert models.get_setting("probe_last_state") == "up"
+    finally:
+        _restore_db()
