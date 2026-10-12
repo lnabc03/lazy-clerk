@@ -9,6 +9,17 @@ services:
       - ./data:/app/data
     env_file: .env
     restart: unless-stopped
+    # 弱 IO 服务器防护（2026-10-12 起，重建卡死复盘）：
+    # 日志轮转封顶——json-file 默认不限大小，探测/调度日志积少成多持续写盘
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    # IO 调度权重调低（cgroup v2 io.weight）：磁盘争抢时让出带宽，
+    # 宁肯签到链路慢一点，不拖垮整机
+    blkio_config:
+      weight: 300
 
   # 代理逃生通道：医院封服务器 IP 时启用。.env 里取消注释代理段五行
   # （含 COMPOSE_PROFILES=proxy）后，随 `docker compose up -d` 自动启动。
@@ -30,6 +41,13 @@ services:
     ports:
       - "127.0.0.1:9090:9090"   # 节点管理 API，仅本机（配 secret）
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    blkio_config:
+      weight: 300
 
 volumes:
   mihomo-cache:

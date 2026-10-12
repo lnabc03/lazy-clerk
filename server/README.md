@@ -93,9 +93,15 @@ docker compose exec lazy-clerk python server/scripts/smoke.py --stage S5 --sendk
 | --- | --- |
 | 看日志 | `docker compose logs -f --tail 100` |
 | 重启 | `docker compose restart` |
-| 升级（压缩包方式） | 解压新包覆盖代码（包内不含 `.env` 与 `data/`，覆盖安全）→ `docker compose up -d --build` |
+| 升级（压缩包方式） | 解压新包覆盖代码（包内不含 `.env` 与 `data/`，覆盖安全）→ `server/scripts/deploy.sh` |
+| 重建并部署（git 方式） | `git pull` → `server/scripts/deploy.sh`（低 IO 优先级构建，防弱盘机器卡死） |
 | 进容器排查 | `docker compose exec lazy-clerk bash` |
 | 代理节点管理 | `server/scripts/node.sh list / use <节点名> / direct` |
+
+> 磁盘 IO 防护（2026-10-12 起）：构建走 `deploy.sh`（nice + ionice 低优先级 +
+> 仓库根 `.dockerignore` 把构建上下文从 6.5MB 瘦到 1.4MB）；运行期两个容器的
+> 日志轮转封顶 5MB×2、IO 调度权重调低（blkio weight 300），磁盘争抢时容器
+> 让出带宽，不再拖垮整机。
 
 ## IP 被封：启用代理逃生通道
 

@@ -1,0 +1,21 @@
+# 构建上下文瘦身（server/Dockerfile 的 context 是仓库根）：
+# 弱 IO 服务器重建容器时，每 MB 上下文都要打包→上传→daemon 解包，
+# 全量排除与镜像无关的目录（2026-10-12 起）。镜像只需要：
+# app/、server/{requirements.txt,main.py,scheduler.py,__init__.py,routes,templates,scripts}
+.git
+.gitignore
+.github
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+tests
+dorm
+personal
+server/data
+server/mihomo/KNOWN_ISSUES.md
+**/.env
+*.log
+*.db
+AGENTS.md
+README.md
+**/README.md

@@ -75,6 +75,7 @@ python3 -m pytest tests/ -q        # 全量测试（test_scheduler 需 apschedul
                                    # 宿主机没有会自动 skip；改调度逻辑时务必
                                    # 用隔离环境跑它，勿删 importorskip）
 cd server && docker-compose build lazy-clerk && docker-compose up -d lazy-clerk   # 部署公网版
+server/scripts/deploy.sh    # 同上但低 IO 优先级（弱盘机器首选，2026-10-12 起）
 ```
 
 - 提交即部署：公网版跑在生产容器里，改完跑测试 → commit → 重建容器 →
