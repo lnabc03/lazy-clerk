@@ -1,4 +1,8 @@
-"""定时探测任务 _probe_job 的状态机单测：up/down、复核、告警去重、恢复通知。"""
+"""定时探测任务 _probe_job 的状态机单测：up/down、判红迟滞、告警去重、恢复通知。
+
+判红迟滞（2026-10-07 起）：初测红后 5 分钟内 3 次复核全红才告警——
+分钟级风控抖动（实测 3-16 分钟）不再产生告警对；确认期间其他入口
+实测转绿则以新鲜事实为准中止判红。"""
 import asyncio
 
 import pytest
@@ -44,17 +48,18 @@ def _patch(monkeypatch, results, pushed):
 
 OK = ProbeResult(True, "认证 100ms；考勤 200ms（节点A）", 200, "proxy")
 RED = ProbeResult(False, "认证 100ms；考勤不通；全量重测无可用节点", 0, "proxy")
+WARMUP_RED = ProbeResult(False, "认证不通；缓冲期内暂不切换", 0, "proxy", warmup=True)
 
 
 def test_down_confirmed_alerts_once(monkeypatch, tmp_path):
-    """首次判红：20 秒复核仍红才告警并置 down；下一小时仍红不重复告警。"""
+    """首次判红：5 分钟内 3 次复核全红才告警并置 down；下一小时仍红不重复告警。"""
     _use_tmp_db(tmp_path)
     try:
         pushed = []
-        calls = _patch(monkeypatch, [RED, RED], pushed)
+        calls = _patch(monkeypatch, [RED, RED, RED, RED], pushed)
         asyncio.run(scheduler._probe_job())
-        assert len(calls) == 2  # 初测 + 复核
-        assert any("无法访问" in t for t in pushed)
+        assert len(calls) == 4  # 初测 + 3 次复核
+        assert any("持续不通" in t for t in pushed)
         assert models.get_setting("probe_last_state") == "down"
 
         pushed.clear()
@@ -67,7 +72,7 @@ def test_down_confirmed_alerts_once(monkeypatch, tmp_path):
 
 
 def test_down_flaky_no_alert(monkeypatch, tmp_path):
-    """初测红、复核绿：抖动不误报，状态为 up。"""
+    """初测红、复核绿：分钟级抖动不误报，状态为 up。"""
     _use_tmp_db(tmp_path)
     try:
         pushed = []
@@ -80,15 +85,92 @@ def test_down_flaky_no_alert(monkeypatch, tmp_path):
         _restore_db()
 
 
+def test_late_flap_no_alert(monkeypatch, tmp_path):
+    """复核两次仍红、第三次转绿（抖动跨越约 3 分钟）：不告警。"""
+    _use_tmp_db(tmp_path)
+    try:
+        pushed = []
+        calls = _patch(monkeypatch, [RED, RED, RED, OK], pushed)
+        asyncio.run(scheduler._probe_job())
+        assert len(calls) == 4
+        assert not pushed
+        assert models.get_setting("probe_last_state") == "up"
+    finally:
+        _restore_db()
+
+
+def test_fresh_green_from_other_source_aborts_alert(monkeypatch, tmp_path):
+    """判红确认期间其他入口（手动探测/门控）实测转绿：以新鲜事实为准，不发过期告警。"""
+    _use_tmp_db(tmp_path)
+    try:
+        pushed = []
+        calls = []
+
+        async def fake_probe(timeout=8.0):
+            calls.append(1)
+            if len(calls) == 4:
+                # 最后一次复核前，另一入口实测转绿并已落库（模拟手动探测）
+                models.record_probe(True, 300, "认证 100ms；考勤 200ms", "proxy")
+            return RED
+
+        async def fake_notify(title, msg, sendkey=None):
+            pushed.append(title)
+
+        async def fake_sleep(seconds):
+            pass
+
+        monkeypatch.setattr("app.core.client.probe", fake_probe)
+        monkeypatch.setattr("app.core.notify.notify", fake_notify)
+        monkeypatch.setattr(scheduler.asyncio, "sleep", fake_sleep)
+        asyncio.run(scheduler._probe_job())
+        assert len(calls) == 4
+        assert not pushed
+        assert models.get_setting("probe_last_state") == "up"
+    finally:
+        _restore_db()
+
+
+def test_warmup_during_confirm_aborts(monkeypatch, tmp_path):
+    """复核撞上换节点缓冲期：暖机噪声不构成证据，本次判红中止、状态不动。"""
+    _use_tmp_db(tmp_path)
+    try:
+        pushed = []
+        calls = _patch(monkeypatch, [RED, WARMUP_RED], pushed)
+        asyncio.run(scheduler._probe_job())
+        assert len(calls) == 2
+        assert not pushed
+        assert models.get_setting("probe_last_state") is None  # 状态未被污染
+    finally:
+        _restore_db()
+
+
+def test_overlap_lock_skips(monkeypatch, tmp_path):
+    """上一次判红复核进行中（锁占用）：本次整点探测直接跳过，不重复探测。"""
+    _use_tmp_db(tmp_path)
+    try:
+        pushed = []
+        calls = _patch(monkeypatch, [RED], pushed)
+
+        async def hold_and_run():
+            async with scheduler._probe_lock:
+                await scheduler._probe_job()
+
+        asyncio.run(hold_and_run())
+        assert not calls
+        assert not pushed
+    finally:
+        _restore_db()
+
+
 def test_recovery_notifies(monkeypatch, tmp_path):
-    """down 后恢复：推恢复通知并置 up。"""
+    """down 后恢复：单次绿即推恢复通知（好消息宜快）并置 up。"""
     _use_tmp_db(tmp_path)
     try:
         models.set_setting("probe_last_state", "down")
         pushed = []
         _patch(monkeypatch, [OK], pushed)
         asyncio.run(scheduler._probe_job())
-        assert any("恢复可达" in t for t in pushed)
+        assert any("已恢复" in t for t in pushed)
         assert models.get_setting("probe_last_state") == "up"
     finally:
         _restore_db()
@@ -114,10 +196,10 @@ def test_down_alert_suppressed_in_sign_window(monkeypatch, tmp_path):
     _use_tmp_db(tmp_path)
     try:
         pushed = []
-        calls = _patch(monkeypatch, [RED, RED], pushed)
+        calls = _patch(monkeypatch, [RED, RED, RED, RED], pushed)
         monkeypatch.setattr(scheduler, "_in_sign_window", lambda: True)
         asyncio.run(scheduler._probe_job())
-        assert len(calls) == 2  # 初测 + 复核照常
+        assert len(calls) == 4  # 初测 + 3 次复核照常
         assert not pushed       # 窗口内不告警
         assert models.get_setting("probe_last_state") == "down"
 
@@ -126,7 +208,7 @@ def test_down_alert_suppressed_in_sign_window(monkeypatch, tmp_path):
         pushed.clear()
         _patch(monkeypatch, [OK], pushed)
         asyncio.run(scheduler._probe_job())
-        assert any("恢复可达" in t for t in pushed)
+        assert any("已恢复" in t for t in pushed)
         assert models.get_setting("probe_last_state") == "up"
     finally:
         _restore_db()

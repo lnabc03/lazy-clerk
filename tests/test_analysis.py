@@ -162,3 +162,46 @@ def test_session_analysis_final_failure_and_fallback(tmp_path):
         assert old_pm["rounds"] is None and old_pm["ok"] == 2 and not old_pm["nodes"]
     finally:
         _restore_db()
+
+
+def test_session_analysis_manual_success_overrides_cancelled(tmp_path):
+    """2026-10-07 pm 场复刻：赛前取消写 cancelled 后管理员手动补齐——
+    日志分析终态必须反映真实结果（手动成功），而不是停在 cancelled；
+    手动失败与状态检测不参与终态。"""
+    _use_tmp_db(tmp_path)
+    try:
+        u1 = models.create_user("甲", "1001", "pw", None)
+        u2 = models.create_user("乙", "1002", "pw", None)
+        d = _day(0)
+        _log(u1, d, "pm", "cancelled", "赛前探测持续不通，本轮签到未执行")
+        _log(u2, d, "pm", "cancelled", "赛前探测持续不通，本轮签到未执行")
+        _log(u1, d, "pm", "failed", "[管理员手动] SSO 网络错误: 502")   # 手动失败不参与
+        _log(u1, d, "pm", "success", "[管理员手动] 签到成功")           # 手动成功=真实终态
+        _log(u2, d, "pm", "checked", "[检测] 未签到")                   # 检测不参与
+        out = models.session_analysis(days=7)
+        assert len(out) == 1
+        s = out[0]
+        assert s["ok"] == 1              # 甲手动签上
+        assert s["cancelled"] == ["乙"]  # 乙仍停在取消
+        assert not s["failed"]
+        # 复活守望口径一致：乙还 pending，整场仍 pending
+        assert models.round_cancelled_pending(d, "pm")
+        # 乙也手动补齐后，整场不再 pending（守望自动闭嘴）
+        _log(u2, d, "pm", "skipped", "[管理员手动] 已签到（状态 1），跳过")
+        assert not models.round_cancelled_pending(d, "pm")
+    finally:
+        _restore_db()
+
+
+def test_summary_manual_success_covers_period(tmp_path):
+    """手动成功计入时段覆盖：仅手动签上的场次也算稳定日（真实状态优先）。"""
+    _use_tmp_db(tmp_path)
+    try:
+        u1 = models.create_user("甲", "1001", "pw", None)
+        _green_day(u1, _day(1))
+        _log(u1, _day(0), "am", "success")
+        _log(u1, _day(0), "pm", "cancelled", "赛前探测持续不通，本轮签到未执行")
+        _log(u1, _day(0), "pm", "success", "[管理员手动] 签到成功")
+        assert models.service_summary()["stable_days"] == 2
+    finally:
+        _restore_db()

@@ -154,6 +154,10 @@
                 <button class="btn btn-outline-danger btn-sm">取消{{ label }}签到</button>
                 {% endif %}
             </form>
+            <form method="post" action="/admin/sign-rerun/{{ p }}"
+                  onsubmit="return confirm('重新拉起今日{{ label }}签到？已签过的账号会自动跳过。')">
+                <button class="btn btn-outline-primary btn-sm">重拉{{ label }}本轮</button>
+            </form>
             {% endfor %}
             {% if skip_today["am"] or skip_today["pm"] %}
             <span class="badge bg-warning text-dark">

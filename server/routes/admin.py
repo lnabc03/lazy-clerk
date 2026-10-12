@@ -84,7 +84,8 @@ async def sign_skip(request: Request, period: str):
 
     取消后赛前守卫直接跳过该场；进行中的重试循环每轮检查标记，点上立即生效。
     场景：预知医院系统维护/关闭（如节假日），避免全天无效重试。
-    """
+    恢复时若本轮已留下 cancelled 终态且仍在窗口内，立即尝试重新拉起
+    （2026-10-07 复盘：旧版恢复只清标记不重拉，本轮事实上救不回来）。"""
     if not is_admin(request):
         return redirect("/admin/login")
     if period not in ("am", "pm"):
@@ -97,12 +98,40 @@ async def sign_skip(request: Request, period: str):
         models.delete_setting(key)
         # 恢复后若再次取消，应能再次收到广播（去重键按场次占位，恢复即释放）
         models.delete_setting(f"round_cancel_notified:{today}:{period}")
-        return redirect("/admin", msg=f"已恢复今日{label}签到")
+        if await signer.maybe_relaunch_round(period):
+            return redirect("/admin", msg=f"已恢复今日{label}签到，本轮已重新拉起（已签过的自动跳过）")
+        return redirect("/admin", msg=f"已恢复今日{label}签到"
+                                      "（窗口内探测转绿后守望会自动补拉本轮）")
     models.set_setting(key, "1")
     # 取消即广播（统一出口，与赛前/连红取消原子去重）：手动取消时赛前守卫与
     # 重试循环都只静默写终态日志，若这里不发通知用户会对缺勤不知情
     await signer.broadcast_round_cancelled(period, "管理员手动取消")
     return redirect("/admin", msg=f"已取消今日{label}签到（含进行中的重试），次日自动失效")
+
+
+@router.post("/sign-rerun/{period}")
+async def sign_rerun(request: Request, period: str):
+    """重新拉起今日某场次签到（已签过/无需签的账号由医院侧状态自然跳过）。
+
+    场景：自动轮次因链路抖动被取消或部分失败，管理员确认恢复后手动补拉——
+    不必等复活守望的下一个检查节拍（2026-10-07 复盘新增）。管理员取消
+    标记优先：已取消的场次要先「恢复」再重拉。"""
+    if not is_admin(request):
+        return redirect("/admin/login")
+    if period not in ("am", "pm"):
+        return redirect("/admin", error="场次无效")
+    from datetime import datetime
+    today = datetime.now(signer.TZ).strftime("%Y-%m-%d")
+    label = signer.PERIOD_NAME[period]
+    if models.get_setting(signer.skip_key(today, period)):
+        return redirect("/admin", error=f"今日{label}已被取消，请先「恢复」再重拉")
+    if signer.round_running(period):
+        return redirect("/admin", msg=f"{label}场次已有轮次在进行中（含赛前守候），无需重拉")
+    if datetime.now(signer.TZ).time() >= signer.STOP_TIME[period]:
+        return redirect("/admin", error=f"{label}签到窗口已关闭，无法重拉")
+    import asyncio
+    asyncio.create_task(signer.sign_all(period))
+    return redirect("/admin", msg=f"已重新拉起今日{label}签到（已签过的账号会自动跳过）")
 
 
 @router.post("/proxy/switch")

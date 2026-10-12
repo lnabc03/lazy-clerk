@@ -46,6 +46,19 @@ RETRY_INTERVAL = 300  # 秒
 # 10 轮以内的重试（节点 502 噪声），按登录失败计数会误伤。
 RED_STREAK_CANCEL = 8
 
+# 赛前守卫守候制（2026-10-07 起）：赛前探测失败不再「20 秒复核即杀整轮」
+# ——分钟级风控抖动实测 3-16 分钟，20 秒复核必然落在抖动期内误杀（当日 pm 场
+# 13:02 取消、13:05 即恢复）。改为与重试循环门控一致的守候语义：每 ~90 秒
+# 探测，恢复即开打，守到截止时间仍不通才取消整轮。
+GUARD_PROBE_INTERVAL = 90  # 秒
+GUARD_HOLD_UNTIL = {"am": time(5, 15), "pm": time(13, 15)}
+
+# 取消轮次的复活冷却：抖动期反复复活会反复拉起全账号登录链路惊扰风控，
+# 冷却期内守望只探不拉（2026-10-07 方案讨论定案：赛前/连红取消均可复活）
+RELAUNCH_COOLDOWN = 600  # 秒
+
+_running_rounds: set[str] = set()  # 进行中的场次（复活守望/手动重拉的并发护栏）
+
 
 def skip_key(date: str, period: str) -> str:
     """管理员手动取消标记的 settings 键（含日期，次日自然失效）。"""
@@ -237,15 +250,16 @@ async def broadcast_round_cancelled(period: str, cause: str) -> None:
 
 async def _broadcast_outage_cancel(user: models.User, period: str, detail: str,
                                    broadcast: bool) -> None:
-    """连红取消的通知。个人版只推本人；服务器版走统一广播出口（原子去重）。"""
+    """连红取消的通知。个人版只推本人；服务器版走统一广播出口（原子去重）。
+    文案只陈述探测事实（连红 N 次、哪几个端口不通），不断言医院侧故障原因。"""
     label = _period_label(period)
     if not broadcast:
         if user.sendkey:
             await notify(f"🚫自动签到取消｜{user.nickname}｜{label}",
-                         f"医院系统持续无法访问（{detail}），本轮自动签到已取消，"
+                         f"到医院系统的探测持续不通（{detail}），本轮自动签到已取消，"
                          "请自行留意考勤。", sendkey=user.sendkey)
         return
-    await broadcast_round_cancelled(period, "医院系统持续无法访问")
+    await broadcast_round_cancelled(period, "到医院系统的探测持续不通")
 
 
 async def sign_user_with_retry(
@@ -288,10 +302,10 @@ async def sign_user_with_retry(
                          user.account, period, p.detail)
                 if datetime.now(TZ).time() >= STOP_TIME[period]:
                     log_fn(user.id, today, period, RESULT_FAILED,
-                           f"窗口关闭（已尝试 {attempts} 次）: 医院系统持续无法访问")
-                    await push_final_failure(user, period, "医院系统持续无法访问",
+                           f"窗口关闭（已尝试 {attempts} 次）: 到医院系统的探测持续不通")
+                    await push_final_failure(user, period, "到医院系统的探测持续不通",
                                              attempts)
-                    return SignOutcome(RESULT_FAILED, "窗口关闭：医院系统持续无法访问")
+                    return SignOutcome(RESULT_FAILED, "窗口关闭：到医院系统的探测持续不通")
                 await asyncio.sleep(RETRY_INTERVAL + random.uniform(-60, 60))
                 continue
             else:
@@ -299,7 +313,7 @@ async def sign_user_with_retry(
                 log.info("门控探测连续失败 %d 次 user=%s period=%s: %s",
                          red_streak, user.account, period, p.detail)
                 if red_streak >= RED_STREAK_CANCEL:
-                    msg = (f"医院系统持续无法访问（连续 {red_streak} 次探测失败），"
+                    msg = (f"到医院系统的探测持续不通（连续 {red_streak} 次探测失败），"
                            "本轮自动签到取消")
                     log_fn(user.id, today, period, RESULT_CANCELLED, msg)
                     await _broadcast_outage_cancel(user, period, p.detail,
@@ -307,10 +321,10 @@ async def sign_user_with_retry(
                     return SignOutcome(RESULT_CANCELLED, msg)
                 if datetime.now(TZ).time() >= STOP_TIME[period]:
                     log_fn(user.id, today, period, RESULT_FAILED,
-                           f"窗口关闭（已尝试 {attempts} 次）: 医院系统持续无法访问")
-                    await push_final_failure(user, period, "医院系统持续无法访问",
+                           f"窗口关闭（已尝试 {attempts} 次）: 到医院系统的探测持续不通")
+                    await push_final_failure(user, period, "到医院系统的探测持续不通",
                                              attempts)
-                    return SignOutcome(RESULT_FAILED, "窗口关闭：医院系统持续无法访问")
+                    return SignOutcome(RESULT_FAILED, "窗口关闭：到医院系统的探测持续不通")
                 await asyncio.sleep(RETRY_INTERVAL + random.uniform(-60, 60))
                 continue
 
@@ -397,11 +411,14 @@ def _log_round_cancelled(today: str, period: str, message: str) -> None:
 
 
 async def _preflight(period: str) -> bool:
-    """赛前守卫：管理员取消标记 → 双端口探测（不可达则 20 秒复核），任一不通过放弃整轮。
+    """赛前守卫：管理员取消标记 → 双端口探测，失败转入守候（不直接杀整轮）。
 
-    取消整轮时经 broadcast_round_cancelled 统一广播（每人一条，原子去重），
-    避免系统故障日出现不知情缺勤。复核防止单次抖动误杀整轮。
-    """
+    守候制（2026-10-07 起）：旧版「20 秒复核即放弃」在分钟级风控抖动下
+    必然误杀——当日 pm 场 13:02 取消、13:05 即恢复，11 人全靠手动补签。
+    现在失败后备守到 GUARD_HOLD_UNTIL（am 5:15 / pm 13:15），每 ~90 秒
+    探测一次，恢复即开打；守到截止仍不通才取消整轮并广播（统一出口，
+    原子去重）。守候期间管理员取消标记即时生效；暖机噪声不构成证据，
+    继续守。"""
     today = datetime.now(TZ).strftime("%Y-%m-%d")
     if models.get_setting(skip_key(today, period)):
         log.info("%s 场次已被管理员手动取消，本轮签到跳过", f"{today}-{period}")
@@ -417,18 +434,29 @@ async def _preflight(period: str) -> bool:
         # 放行让重试循环去打（其门控会接手真实故障的判定）
         log.info("赛前探测处于缓冲期（%s），放行", first.detail)
         return True
-    log.warning("赛前探测失败（%s），20 秒后复核", first.detail)
-    await asyncio.sleep(20)
-    second = await probe()
-    if not second.warmup:
-        models.record_probe(second.ok, second.latency_ms, second.detail, second.channel)
-    if second.ok or second.warmup:
-        if second.warmup:
-            log.info("赛前复核处于缓冲期（%s），放行", second.detail)
-        return True
-    log.warning("赛前探测复核仍失败（%s），本轮签到放弃", second.detail)
-    _log_round_cancelled(today, period, "赛前探测连续失败，本轮签到未执行")
-    await broadcast_round_cancelled(period, "医院系统暂时无法访问")
+    deadline = GUARD_HOLD_UNTIL[period]
+    log.warning("赛前探测失败（%s），转入守候（最迟 %s 恢复则开打）",
+                first.detail, deadline.strftime("%H:%M"))
+    while datetime.now(TZ).time() < deadline:
+        await asyncio.sleep(GUARD_PROBE_INTERVAL + random.uniform(-15, 15))
+        if models.get_setting(skip_key(today, period)):
+            log.info("守候期间管理员取消了 %s 场次，本轮签到跳过", f"{today}-{period}")
+            _log_round_cancelled(today, period, "管理员取消了本轮签到")
+            return False
+        p = await probe()
+        if not p.warmup:
+            models.record_probe(p.ok, p.latency_ms, p.detail, p.channel)
+        if p.ok:
+            log.info("赛前守候探测恢复（%s），开打", p.detail)
+            return True
+        if p.warmup:
+            log.info("赛前守候探测处于缓冲期（%s），继续守候", p.detail)
+        else:
+            log.info("赛前守候中，仍不通：%s", p.detail)
+    log.warning("赛前守候至 %s 仍不通（%s），本轮签到放弃",
+                deadline.strftime("%H:%M"), first.detail)
+    _log_round_cancelled(today, period, "赛前探测持续不通，本轮签到未执行")
+    await broadcast_round_cancelled(period, "到医院系统的探测持续不通")
     return False
 
 
@@ -438,21 +466,64 @@ async def sign_all(period: str) -> None:
     不能顺序 await——某账号进入 5 分钟重试循环会阻塞后面所有账号
     （实测：一人请假被拒，后续账号全部错过签到窗口）。
     """
-    log.info("开始 %s 时段签到", period)
-    if not await _preflight(period):
+    if period in _running_rounds:
+        # cron/复活守望/手动重拉可能撞车：同一场次同时只允许一个在跑
+        log.info("%s 场次已在进行中，跳过重复拉起", period)
         return
-    users = [u for u in models.list_users() if u.enabled]
-    tasks = []
-    for i, user in enumerate(users):
-        if i:
-            # 拟人化：账号间随机间隔 10–40 秒，避免多账号同一秒齐发命中风控
-            delay = random.uniform(10, 40)
-            log.info("账号间随机间隔 %.0f 秒", delay)
-            await asyncio.sleep(delay)
-        tasks.append(asyncio.create_task(_sign_one(user, period)))
-    for t in tasks:
-        await t
-    log.info("%s 时段签到结束", period)
+    _running_rounds.add(period)
+    try:
+        log.info("开始 %s 时段签到", period)
+        if not await _preflight(period):
+            return
+        users = [u for u in models.list_users() if u.enabled]
+        tasks = []
+        for i, user in enumerate(users):
+            if i:
+                # 拟人化：账号间随机间隔 10–40 秒，避免多账号同一秒齐发命中风控
+                delay = random.uniform(10, 40)
+                log.info("账号间随机间隔 %.0f 秒", delay)
+                await asyncio.sleep(delay)
+            tasks.append(asyncio.create_task(_sign_one(user, period)))
+        for t in tasks:
+            await t
+        log.info("%s 时段签到结束", period)
+    finally:
+        _running_rounds.discard(period)
+
+
+def round_running(period: str) -> bool:
+    """该场次当前是否有签到轮次在进行（含赛前守候）。"""
+    return period in _running_rounds
+
+
+async def maybe_relaunch_round(period: str) -> bool:
+    """取消轮次的复活：窗口内探测转绿且本轮曾被取消 → 自动重拉。
+
+    触发条件全部满足才拉：仍在签到窗口（STOP_TIME 前）、无管理员取消标记
+    （手动取消是明确意志，不复活）、存在停在 cancelled 终态的启用用户
+    （手动补齐过的场次自动闭嘴）、无进行中轮次、距上次复活过冷却期。
+    2026-10-07 pm 场的缺口：13:02 赛前取消、13:05 链路恢复，但 cron 每场
+    只触发一次，无人重拉，11 人全靠管理员手动补签。返回是否已触发。"""
+    today = datetime.now(TZ).strftime("%Y-%m-%d")
+    if models.get_setting(skip_key(today, period)):
+        return False
+    if period in _running_rounds:
+        return False
+    if datetime.now(TZ).time() >= STOP_TIME[period]:
+        return False
+    if not models.round_cancelled_pending(today, period):
+        return False
+    cooldown_key = f"round_relaunch:{today}:{period}"
+    last = models.get_setting(cooldown_key)
+    if last and datetime.now(TZ).timestamp() - float(last) < RELAUNCH_COOLDOWN:
+        return False
+    p = await _probe_gate(record=True)  # 与门控共享缓存，守望不额外加重链路
+    if not p.ok or p.warmup:
+        return False
+    models.set_setting(cooldown_key, str(datetime.now(TZ).timestamp()))
+    log.info("探测恢复且 %s 场次存在被取消的用户，自动重拉本轮", period)
+    asyncio.create_task(sign_all(period))
+    return True
 
 
 def current_period() -> str:

@@ -198,6 +198,21 @@ def recent_logs(limit: int = 50) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def round_cancelled_pending(date: str, period: str) -> bool:
+    """该场是否有启用用户停在 cancelled 终态（复活守望的触发条件）。
+
+    口径与日志分析一致（_terminal_eligible）：取消后手动签上的用户不再
+    pending；全部补齐则整场不再 pending，守望自动闭嘴。"""
+    terminal: dict[int, str] = {}
+    for r in conn().execute(
+            "SELECT user_id, result, message FROM sign_logs"
+            " WHERE date=? AND period=? ORDER BY id", (date, period)).fetchall():
+        if _terminal_eligible(r["result"], r["message"] or ""):
+            terminal[r["user_id"]] = r["result"]
+    enabled = {u.id for u in list_users() if u.enabled}
+    return any(res == "cancelled" for uid, res in terminal.items() if uid in enabled)
+
+
 def cleanup_logs(days: int = 90) -> int:
     cutoff = (datetime.now(TZ) - timedelta(days=days)).strftime("%Y-%m-%d")
     cur = conn().execute("DELETE FROM sign_logs WHERE date<?", (cutoff,))
@@ -207,9 +222,23 @@ def cleanup_logs(days: int = 90) -> int:
 
 # ---------- sign_attempts（定时签到逐轮尝试：管理页"日志分析"数据源） ----------
 
-# 非定时任务产生的日志前缀（手动签到/状态检测），场次统计与稳定性判定一律剔除
-_NON_AUTO_PREFIX = ("[检测]", "[手动]", "[管理员手动]")
 _OK_RESULTS = ("success", "skipped", "no_schedule")
+
+
+def _terminal_eligible(result: str, message: str) -> bool:
+    """终态口径准入（日志分析/稳定性判定/复活守望共用）：
+
+    - [检测] 永不参与——只是状态快照，不代表签到动作
+    - 手动动作的成功类参与——轮次被自动取消后管理员/用户手动签上就是真实
+      终态（2026-10-07 pm 场：11 人 13:56 起手动补齐，却被 13:02 的
+      cancelled 遮蔽，日志分析显示全员取消）
+    - 手动失败不参与——随手一试的失败（如撞上节点坏相 502）不是自动轮次的
+      终态证据，更不能把稳定日误判为失败日"""
+    if message.startswith("[检测]"):
+        return False
+    if message.startswith(("[手动]", "[管理员手动]")):
+        return result in _OK_RESULTS
+    return True
 
 
 def add_attempt(user_id: int, date: str, period: str, round_no: int,
@@ -241,7 +270,7 @@ def service_summary() -> dict:
     ).fetchone()
     days: dict[str, dict] = {}
     for r in conn().execute("SELECT date, period, result, message FROM sign_logs"):
-        if (r["message"] or "").startswith(_NON_AUTO_PREFIX):
+        if not _terminal_eligible(r["result"], r["message"] or ""):
             continue
         d = days.setdefault(r["date"], {"periods": set(), "failed": False})
         d["periods"].add(r["period"])
@@ -291,11 +320,12 @@ def session_analysis(days: int = 7) -> list[dict]:
     # 终态口径：sign_logs 是每账号每场的权威终态（成功/失败/取消），attempts
     # 只是逐轮过程证据。连红取消/管理员中途取消时最后一轮 attempt 仍是 failed，
     # 只有 sign_logs 记着 cancelled——终态分类必须优先看 sign_logs，否则取消
-    # 场次会被误报为「X 人失败」。
+    # 场次会被误报为「X 人失败」。准入规则见 _terminal_eligible（手动成功
+    # 覆盖先前的 cancelled——取消后手动补齐是真实终态）。
     terminal: dict[str, dict[int, sqlite3.Row]] = {}
     for r in conn().execute(
             "SELECT * FROM sign_logs WHERE date>=? ORDER BY id", (cutoff,)).fetchall():
-        if (r["message"] or "").startswith(_NON_AUTO_PREFIX):
+        if not _terminal_eligible(r["result"], r["message"] or ""):
             continue
         terminal.setdefault(f'{r["date"]}-{r["period"]}', {})[r["user_id"]] = r  # 后写覆盖 = 终态
 
@@ -383,6 +413,14 @@ def record_probe(ok: bool, latency_ms: int | None, detail: str, channel: str = "
 def latest_probe() -> sqlite3.Row | None:
     return conn().execute(
         "SELECT * FROM probe_logs ORDER BY id DESC LIMIT 1").fetchone()
+
+
+def has_green_probe_since(created_at: str) -> bool:
+    """指定时刻之后是否存在可达探测（判红确认期间的「新鲜绿」中止依据：
+    其他入口——手动探测/门控/守望——实测转绿即说明链路曾通，不告警）。"""
+    return conn().execute(
+        "SELECT 1 FROM probe_logs WHERE ok=1 AND created_at>=? LIMIT 1",
+        (created_at,)).fetchone() is not None
 
 
 def probe_heatmap(days: int = 7) -> list[dict]:
@@ -496,12 +534,15 @@ def delete_setting(key: str) -> None:
 
 
 def cleanup_skip_flags() -> int:
-    """清理过期的日期作用域 settings 键（昨天及以前）：手动取消标记 skip_sign:
-    与取消广播去重键 round_cancel_notified:（键含日期，过期即无意义）。"""
+    """清理过期的日期作用域 settings 键（昨天及以前）：手动取消标记 skip_sign:、
+    取消广播去重键 round_cancel_notified:、复活冷却键 round_relaunch:
+    （键均含日期，过期即无意义）。"""
     today = datetime.now(TZ).strftime("%Y-%m-%d")
     cur = conn().execute(
         "DELETE FROM settings WHERE (key LIKE 'skip_sign:%' AND key < ?)"
-        " OR (key LIKE 'round_cancel_notified:%' AND key < ?)",
-        (f"skip_sign:{today}", f"round_cancel_notified:{today}"))
+        " OR (key LIKE 'round_cancel_notified:%' AND key < ?)"
+        " OR (key LIKE 'round_relaunch:%' AND key < ?)",
+        (f"skip_sign:{today}", f"round_cancel_notified:{today}",
+         f"round_relaunch:{today}"))
     conn().commit()
     return cur.rowcount

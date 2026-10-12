@@ -203,7 +203,7 @@ def test_retry_enters_watch_and_cancels_after_red_streak(monkeypatch):
     user.sendkey = "SCTxxx"
     outcome = asyncio.run(signer.sign_user_with_retry(user, "am", log_fn=lambda *a: None))
     assert outcome.result == signer.RESULT_CANCELLED
-    assert "持续无法访问" in outcome.message
+    assert "探测持续不通" in outcome.message
     assert calls.count("try") == 1  # 只打了首次登录，之后全部守候
     # 个人版模式：只推本人，标题带“自动签到取消”
     assert len(pushed) == 1 and "自动签到取消" in pushed[0][0]
@@ -304,13 +304,40 @@ def test_admin_skip_flag_stops_retry_loop(monkeypatch, tmp_path):
         object.__setattr__(models.settings, "data_dir", "data")
 
 
-def test_sign_all_preflight_aborts_when_unreachable(monkeypatch, tmp_path):
-    """赛前探测连续失败 → 整轮放弃：统一广播出口逐用户通知（每人一条，
-    不再另发管理员诊断版——诊断留在管理页/热力图）。"""
+class _FakeDT:
+    """赛前守候测试用：伪造 signer 的当前时刻（队列依次推进，耗尽后停在末值）。
+
+    signer 模块顶部 `from datetime import datetime`，守候循环每拍重读
+    datetime.now(TZ)——monkeypatch 模块属性即可控制守候节奏与截止判定。"""
+
+    def __init__(self, *hms):
+        from datetime import datetime as _dt
+        today = _dt.now().date()  # 与 skip 标记/落库日期的真实今日口径一致
+        self._times = [_dt(today.year, today.month, today.day, h, m) for h, m in hms]
+
+    def now(self, tz=None):
+        if len(self._times) > 1:
+            return self._times.pop(0)
+        return self._times[0]
+
+
+def _tmp_db(tmp_path):
     from app import db
     object.__setattr__(models.settings, "data_dir", str(tmp_path))
     db._conn = None
     db.init()
+    return db
+
+
+def _restore_tmp_db(db):
+    db._conn = None
+    object.__setattr__(models.settings, "data_dir", "data")
+
+
+def test_sign_all_preflight_aborts_when_unreachable(monkeypatch, tmp_path):
+    """赛前守候到截止（pm 13:15）仍不通 → 整轮放弃：统一广播出口逐用户通知
+    （每人一条，不再另发管理员诊断版——诊断留在管理页/热力图）。"""
+    db = _tmp_db(tmp_path)
     try:
         probes = []
 
@@ -333,6 +360,8 @@ def test_sign_all_preflight_aborts_when_unreachable(monkeypatch, tmp_path):
         monkeypatch.setattr(signer, "probe", fake_probe)
         monkeypatch.setattr(signer.asyncio, "sleep", fake_sleep)
         monkeypatch.setattr(signer, "notify", fake_notify)
+        # 已过守候截止（13:15）：初测红即取消，不再守候
+        monkeypatch.setattr(signer, "datetime", _FakeDT((13, 20)))
 
         signed = []
 
@@ -342,15 +371,101 @@ def test_sign_all_preflight_aborts_when_unreachable(monkeypatch, tmp_path):
         monkeypatch.setattr(signer, "_sign_one", fake_sign_one)
 
         asyncio.run(signer.sign_all("pm"))
-        assert len(probes) == 2                    # 一次失败 + 一次复核
+        assert len(probes) == 1                    # 已过截止：只初测，不守候
         assert not signed                          # 未进入账号签到
         broadcasts = [(t, m, k) for t, m, k in pushed if "自动签到取消" in t]
         assert len(broadcasts) == 1 and broadcasts[0][2] == "SCTxxx"  # 仅启用且有 key 的用户
-        assert "医院系统暂时无法访问" in broadcasts[0][1]
-        assert not [t for t, m, k in pushed if "无法访问" in t and k is None]  # 无管理员专属版
+        assert "探测持续不通" in broadcasts[0][1]
+        assert not [t for t, m, k in pushed if "持续不通" in t and k is None]  # 无管理员专属版
     finally:
-        db._conn = None
-        object.__setattr__(models.settings, "data_dir", "data")
+        _restore_tmp_db(db)
+
+
+def test_preflight_hold_recovers_and_signs(monkeypatch, tmp_path):
+    """守候制核心场景（2026-10-07 pm 场复刻）：开局红 → 守候两拍 → 第三拍转绿
+    → 正常开打，不取消不广播。"""
+    db = _tmp_db(tmp_path)
+    try:
+        probes = []
+
+        async def fake_probe(timeout=8.0, switch_on_fail=True):
+            probes.append(1)
+            if len(probes) < 3:
+                return ProbeResult(False, "认证不通；考勤不通；全量重测无可用节点", 0)
+            return ProbeResult(True, "认证 300ms；考勤 400ms", 400)
+
+        async def fake_sleep(seconds):
+            pass
+
+        pushed = []
+
+        async def fake_notify(title, msg, sendkey=None):
+            pushed.append(title)
+
+        monkeypatch.setattr(signer, "probe", fake_probe)
+        monkeypatch.setattr(signer.asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(signer, "notify", fake_notify)
+        monkeypatch.setattr(signer, "datetime", _FakeDT((13, 1), (13, 2), (13, 3), (13, 4)))
+        monkeypatch.setattr(models, "list_users", lambda: [_user(1, "a")])
+
+        signed = []
+
+        async def fake_sign_one(user, period):
+            signed.append(user.account)
+
+        monkeypatch.setattr(signer, "_sign_one", fake_sign_one)
+        asyncio.run(signer.sign_all("pm"))
+        assert len(probes) == 3       # 初测 + 守候两拍后转绿
+        assert signed == ["a"]        # 恢复即开打
+        assert not pushed             # 无取消广播
+    finally:
+        _restore_tmp_db(db)
+
+
+def test_preflight_hold_aborts_on_admin_skip(monkeypatch, tmp_path):
+    """守候期间管理员取消：下一拍检查标记立即生效，写 cancelled 终态、不广播
+    （广播由 sign-skip 路由的取消动作负责）。"""
+    db = _tmp_db(tmp_path)
+    try:
+        from datetime import datetime
+        today = datetime.now(signer.TZ).strftime("%Y-%m-%d")
+        probes = []
+
+        async def fake_probe(timeout=8.0, switch_on_fail=True):
+            probes.append(1)
+            if len(probes) == 1:
+                # 守候期间管理员点下取消
+                models.set_setting(signer.skip_key(today, "pm"), "1")
+            return ProbeResult(False, "认证不通；考勤不通", 0)
+
+        async def fake_sleep(seconds):
+            pass
+
+        monkeypatch.setattr(signer, "probe", fake_probe)
+        monkeypatch.setattr(signer.asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(signer, "datetime", _FakeDT((13, 1), (13, 2), (13, 3)))
+        monkeypatch.setattr(models, "list_users", lambda: [_user(1, "a")])
+
+        pushed = []
+
+        async def fake_notify(title, msg, sendkey=None):
+            pushed.append(title)
+
+        monkeypatch.setattr(signer, "notify", fake_notify)
+        signed = []
+
+        async def fake_sign_one(user, period):
+            signed.append(user.account)
+
+        monkeypatch.setattr(signer, "_sign_one", fake_sign_one)
+        asyncio.run(signer.sign_all("pm"))
+        assert not signed
+        assert not pushed  # 管理员取消的广播走 sign-skip 路由，守卫保持静默
+        rows = models.today_results()
+        assert rows[1]["pm"]["result"] == signer.RESULT_CANCELLED
+        assert "管理员取消" in rows[1]["pm"]["message"]
+    finally:
+        _restore_tmp_db(db)
 
 
 def test_broadcast_round_cancelled_dedupes_across_paths(monkeypatch, tmp_path):
@@ -381,3 +496,105 @@ def test_broadcast_round_cancelled_dedupes_across_paths(monkeypatch, tmp_path):
     finally:
         db._conn = None
         object.__setattr__(models.settings, "data_dir", "data")
+
+
+# ---------- 取消轮次的复活守望（2026-10-07 复盘：取消后窗口内转绿自动重拉） ----------
+
+
+def _setup_relaunch(monkeypatch, tmp_path, probe_ok=True, cancelled=True):
+    """复活测试公共脚手架：tmp 库 + 一个启用用户 +（可选）cancelled 终态
+    + 伪造时刻 13:30（pm 窗口内）+ fake 门控探针 + fake sign_all。"""
+    db = _tmp_db(tmp_path)
+    from datetime import datetime
+    today = datetime.now(signer.TZ).strftime("%Y-%m-%d")
+    uid = models.create_user("甲", "1001", "pw", None)
+    if cancelled:
+        models.add_log(uid, today, "pm", signer.RESULT_CANCELLED,
+                       "赛前探测持续不通，本轮签到未执行")
+    monkeypatch.setattr(signer, "datetime", _FakeDT((13, 30)))
+
+    async def fake_gate(record):
+        return ProbeResult(probe_ok, "认证 10ms；考勤 20ms" if probe_ok else "不通", 20)
+
+    monkeypatch.setattr(signer, "_probe_gate", fake_gate)
+    launched = []
+
+    async def fake_sign_all(period):
+        launched.append(period)
+
+    monkeypatch.setattr(signer, "sign_all", fake_sign_all)
+    return db, today, launched
+
+
+async def _run_relaunch():
+    ok = await signer.maybe_relaunch_round("pm")
+    await asyncio.sleep(0)  # 让 create_task 的重拉协程跑一拍
+    return ok
+
+
+def test_relaunch_after_cancel_when_green(monkeypatch, tmp_path):
+    """赛前取消的场次窗口内转绿 → 自动重拉；冷却期内不重复拉。"""
+    db, today, launched = _setup_relaunch(monkeypatch, tmp_path)
+    try:
+        assert asyncio.run(_run_relaunch()) is True
+        assert launched == ["pm"]
+        assert models.get_setting(f"round_relaunch:{today}:pm")
+        # 冷却期内第二次呼叫：直接拒绝（探针都不再打）
+        assert asyncio.run(_run_relaunch()) is False
+        assert launched == ["pm"]
+    finally:
+        _restore_tmp_db(db)
+
+
+def test_relaunch_blocked_when_red(monkeypatch, tmp_path):
+    """探测仍红：不复活。"""
+    db, today, launched = _setup_relaunch(monkeypatch, tmp_path, probe_ok=False)
+    try:
+        assert asyncio.run(_run_relaunch()) is False
+        assert not launched
+    finally:
+        _restore_tmp_db(db)
+
+
+def test_relaunch_respects_admin_skip(monkeypatch, tmp_path):
+    """管理员手动取消（skip 标记）是明确意志：不复活。"""
+    db, today, launched = _setup_relaunch(monkeypatch, tmp_path)
+    try:
+        models.set_setting(signer.skip_key(today, "pm"), "1")
+        assert asyncio.run(_run_relaunch()) is False
+        assert not launched
+    finally:
+        _restore_tmp_db(db)
+
+
+def test_relaunch_blocked_while_round_running(monkeypatch, tmp_path):
+    """本轮已在进行（含赛前守候）：不重复拉起。"""
+    db, today, launched = _setup_relaunch(monkeypatch, tmp_path)
+    try:
+        signer._running_rounds.add("pm")
+        assert asyncio.run(_run_relaunch()) is False
+        assert not launched
+    finally:
+        signer._running_rounds.discard("pm")
+        _restore_tmp_db(db)
+
+
+def test_relaunch_noop_without_cancelled_terminal(monkeypatch, tmp_path):
+    """本轮无 cancelled 终态（正常签到日）：守望静默，不探测不拉起。"""
+    db, today, launched = _setup_relaunch(monkeypatch, tmp_path, cancelled=False)
+    try:
+        assert asyncio.run(_run_relaunch()) is False
+        assert not launched
+    finally:
+        _restore_tmp_db(db)
+
+
+def test_relaunch_stops_after_window(monkeypatch, tmp_path):
+    """窗口关闭后（>= STOP_TIME）不复活——次日/隔场由 cron 负责。"""
+    db, today, launched = _setup_relaunch(monkeypatch, tmp_path)
+    try:
+        monkeypatch.setattr(signer, "datetime", _FakeDT((15, 0)))
+        assert asyncio.run(_run_relaunch()) is False
+        assert not launched
+    finally:
+        _restore_tmp_db(db)
